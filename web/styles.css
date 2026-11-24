@@ -1,0 +1,69 @@
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Light: Branco + Azul Royal | Dark: Preto Obsidiana + Dourado Champagne */
+.mesh-bg {
+  background-image:
+    radial-gradient(at 10% 0%, rgba(37, 99, 235, 0.08) 0px, transparent 45%),
+    radial-gradient(at 90% 10%, rgba(59, 130, 246, 0.06) 0px, transparent 40%);
+}
+
+.dark .mesh-bg {
+  background-image:
+    radial-gradient(at 12% 0%, rgba(212, 175, 55, 0.14) 0px, transparent 48%),
+    radial-gradient(at 88% 8%, rgba(245, 208, 97, 0.07) 0px, transparent 42%);
+}
+
+@keyframes fadeSlideUp {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-enter {
+  animation: fadeSlideUp 0.28s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.card-interactive {
+  transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
+}
+.card-interactive:hover {
+  transform: translateY(-2px);
+}
+
+@keyframes tickerScroll {
+  0% {
+    transform: translateX(0);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
+}
+
+.ticker-track {
+  display: flex;
+  width: max-content;
+  animation: tickerScroll 28s linear infinite;
+}
+
+.ticker-wrap:hover .ticker-track {
+  animation-play-state: paused;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.35);
+  border-radius: 999px;
+}

@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="pt-BR" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Finanças AI · Private & Neobank</title>
+  <link rel="manifest" href="/manifest.json" />
+  <meta name="theme-color" content="#06070a" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: { sans: ['"Plus Jakarta Sans"', 'system-ui', 'sans-serif'] },
+          colors: {
+            gold: { 300: '#f5d061', 400: '#e5b842', 500: '#d4af37', 600: '#b38b22' },
+            royal: { 500: '#2563eb', 600: '#1d4ed8', 700: '#1e40af' },
+            obsidian: { 950: '#06070a', 900: '#0d1017', 800: '#151923' },
+            surface: { 900: '#0d1017', 800: '#131722', 700: '#1b2030' }
+          }
+        }
+      }
+    };
+  </script>
+  <link rel="stylesheet" href="/styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js" defer></script>
+  <script type="importmap">
+    {
+      "imports": {
+        "react": "https://esm.sh/react@18.3.1",
+        "react-dom/client": "https://esm.sh/react-dom@18.3.1/client",
+        "htm": "https://esm.sh/htm@3.1.1"
+      }
+    }
+  </script>
+  <script type="module" src="/app.js"></script>
+</head>
+<body class="bg-[#f4f7fb] text-slate-900 dark:bg-obsidian-950 dark:text-slate-100 antialiased selection:bg-gold-500/30">
+  <div id="root"></div>
+</body>
+</html>
