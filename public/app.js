@@ -86,9 +86,10 @@ function DeltaPill({ pct, invertColors = false }) {
 
 function App() {
   const [authChecked, setAuthChecked] = useState(false);
-  const [authRequired, setAuthRequired] = useState(false);
-  const [usernameRequired, setUsernameRequired] = useState(false);
-  const [authenticated, setAuthenticated] = useState(true);
+  const [authRequired, setAuthRequired] = useState(true);
+  const [usernameRequired, setUsernameRequired] = useState(true);
+  const [authenticated, setAuthenticated] = useState(false);
+  const [authError, setAuthError] = useState(false);
   const [loginUser, setLoginUser] = useState("");
   const [loginPass, setLoginPass] = useState("");
   const [trustBrowser, setTrustBrowser] = useState(true);
@@ -251,6 +252,7 @@ function App() {
     (async () => {
       try {
         const status = await apiFetch("/api/auth/status");
+        setAuthError(false);
         setAuthRequired(Boolean(status.auth_required));
         setUsernameRequired(Boolean(status.username_required));
         setAuthenticated(Boolean(status.authenticated));
@@ -259,8 +261,8 @@ function App() {
           await loadAll();
         }
       } catch {
+        setAuthError(true);
         setAuthChecked(true);
-        await loadAll();
       }
     })();
   }, [loadAll]);
@@ -619,6 +621,23 @@ function App() {
     return html`
       <div class="min-h-screen flex items-center justify-center mesh-bg">
         <div class="text-sm font-semibold text-slate-400 animate-pulse">Verificando acesso seguro...</div>
+      </div>
+    `;
+  }
+
+  if (authError) {
+    return html`
+      <div class="min-h-screen flex items-center justify-center mesh-bg p-4">
+        <div class="w-full max-w-sm p-6 rounded-3xl bg-white dark:bg-obsidian-900 border border-rose-500/30 text-center space-y-4">
+          <div class="text-2xl">⚠️</div>
+          <div class="text-sm font-semibold">Não foi possível verificar a autenticação com o servidor.</div>
+          <button
+            onClick=${() => window.location.reload()}
+            class="px-4 py-2.5 rounded-xl bg-royal-600 dark:bg-gold-500 text-white dark:text-obsidian-950 text-xs font-bold"
+          >
+            Tentar Novamente
+          </button>
+        </div>
       </div>
     `;
   }

@@ -164,9 +164,9 @@ def create_app() -> FastAPI:
     tg_initialized = False
     init_lock = asyncio.Lock()
 
-    async def _ensure_initialized() -> None:
-        nonlocal db_initialized, tg_initialized
-        if db_initialized and (tg_app is None or tg_initialized):
+    async def _ensure_db_initialized() -> None:
+        nonlocal db_initialized
+        if db_initialized:
             return
         async with init_lock:
             if not db_initialized:
@@ -174,13 +174,20 @@ def create_app() -> FastAPI:
                 async with db.session_factory() as session:
                     await seed_defaults(session)
                 db_initialized = True
+
+    async def _ensure_tg_initialized() -> None:
+        nonlocal tg_initialized
+        if tg_app is None or tg_initialized:
+            return
+        async with init_lock:
             if tg_app is not None and not tg_initialized:
                 await tg_app.initialize()
                 tg_initialized = True
 
     @asynccontextmanager
     async def lifespan(_fastapi_app: FastAPI):
-        await _ensure_initialized()
+        if not settings.is_vercel:
+            await _ensure_db_initialized()
 
         tg_started = False
         tg_task: asyncio.Task[None] | None = None
@@ -191,7 +198,8 @@ def create_app() -> FastAPI:
             delay = 5
             while True:
                 try:
-                    await _ensure_initialized()
+                    await _ensure_db_initialized()
+                    await _ensure_tg_initialized()
                     await tg_app.bot.set_my_commands(
                         [BotCommand(s.command, s.description) for s in router.all_commands()]
                     )
@@ -247,7 +255,7 @@ def create_app() -> FastAPI:
 
     @fastapi_app.get("/api/health")
     async def health() -> dict[str, str]:
-        await _ensure_initialized()
+        await _ensure_db_initialized()
         return {"status": "ok", "mode": "vercel" if settings.is_vercel else "local"}
 
     @fastapi_app.get("/api/auth/status")
@@ -351,7 +359,8 @@ def create_app() -> FastAPI:
         ):
             raise HTTPException(status_code=403, detail="Webhook secret inválido.")
 
-        await _ensure_initialized()
+        await _ensure_db_initialized()
+        await _ensure_tg_initialized()
         payload = await request.json()
         update = Update.de_json(payload, tg_app.bot)
         if update is not None:
