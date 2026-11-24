@@ -37,8 +37,9 @@ class Settings(BaseSettings):
     # Servidor Web / PWA
     web_host: str = "127.0.0.1"
     web_port: int = 8000
-    web_access_user: str = ""
+    web_access_user: str = "admin"
     web_access_token: str = ""
+    web_2fa_enabled: bool = False
     public_url: str = ""
 
     # Sincronização com Canal

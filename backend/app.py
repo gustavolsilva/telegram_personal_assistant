@@ -8,9 +8,13 @@ import secrets
 from contextlib import asynccontextmanager
 
 from core.auth import (
+    SESSION_TTL_SECONDS,
+    TRUSTED_SESSION_TTL_SECONDS,
+    create_2fa_challenge,
     create_session_token,
     extract_provided_token,
     is_authorized_telegram_user,
+    verify_2fa_challenge,
     verify_session_or_access_token,
 )
 from core.config import PROJECT_ROOT, get_settings
@@ -46,6 +50,13 @@ logger = logging.getLogger("assistant")
 class LoginBody(BaseModel):
     username: str = ""
     password: str
+    trust_browser: bool = True
+
+
+class Verify2FABody(BaseModel):
+    challenge_token: str
+    code: str
+    trust_browser: bool = True
 
 
 def _build_telegram_app(
@@ -247,35 +258,79 @@ def create_app() -> FastAPI:
     ) -> dict[str, bool]:
         expected = settings.web_access_token.strip()
         if not expected:
-            return {"auth_required": False, "authenticated": True, "username_required": False}
+            return {
+                "auth_required": False,
+                "authenticated": True,
+                "username_required": False,
+                "two_fa_enabled": False,
+            }
         provided = extract_provided_token(x_access_token, authorization, tpa_session)
         return {
             "auth_required": True,
             "authenticated": verify_session_or_access_token(provided, expected),
-            "username_required": bool(settings.web_access_user.strip()),
+            "username_required": True,
+            "two_fa_enabled": settings.web_2fa_enabled,
         }
 
-    @fastapi_app.post("/api/auth/login")
-    async def auth_login(body: LoginBody, response: Response) -> dict[str, object]:
-        expected_pass = settings.web_access_token.strip()
-        expected_user = settings.web_access_user.strip()
-        if not expected_pass:
-            return {"authenticated": True, "token": ""}
-        if expected_user and not secrets.compare_digest(body.username.strip(), expected_user):
-            raise HTTPException(status_code=401, detail="Usuário ou senha incorretos.")
-        if not secrets.compare_digest(body.password, expected_pass):
-            raise HTTPException(status_code=401, detail="Usuário ou senha incorretos.")
-
-        session_tok = create_session_token(expected_pass)
+    def _issue_session_response(
+        response: Response, secret: str, trust_browser: bool
+    ) -> dict[str, object]:
+        ttl = TRUSTED_SESSION_TTL_SECONDS if trust_browser else SESSION_TTL_SECONDS
+        session_tok = create_session_token(secret, ttl_seconds=ttl)
         response.set_cookie(
             key="tpa_session",
             value=session_tok,
             httponly=True,
             samesite="lax",
             secure=settings.is_vercel,
-            max_age=7 * 24 * 3600,
+            max_age=ttl if trust_browser else None,
         )
-        return {"authenticated": True, "token": session_tok}
+        return {"authenticated": True, "requires_2fa": False, "token": session_tok}
+
+    @fastapi_app.post("/api/auth/login")
+    async def auth_login(body: LoginBody, response: Response) -> dict[str, object]:
+        expected_pass = settings.web_access_token.strip()
+        expected_user = (settings.web_access_user.strip() or "admin")
+        if not expected_pass:
+            return {"authenticated": True, "requires_2fa": False, "token": ""}
+        if not secrets.compare_digest(body.username.strip(), expected_user):
+            raise HTTPException(status_code=401, detail="Usuário ou senha incorretos.")
+        if not secrets.compare_digest(body.password, expected_pass):
+            raise HTTPException(status_code=401, detail="Usuário ou senha incorretos.")
+
+        if settings.web_2fa_enabled:
+            if tg_app is None or settings.telegram_user_id is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="2FA ativo, mas TELEGRAM_BOT_TOKEN ou TELEGRAM_USER_ID não configurado.",
+                )
+            code = f"{secrets.randbelow(1_000_000):06d}"
+            challenge = create_2fa_challenge(expected_pass, code)
+            await tg_app.bot.send_message(
+                chat_id=settings.telegram_user_id,
+                text=(
+                    f"🔐 <b>Código 2FA de Acesso ao Painel</b>\n\n"
+                    f"Seu token aleatório: <code>{code}</code>\n"
+                    f"⏱️ Válido por 5 minutos."
+                ),
+                parse_mode="HTML",
+            )
+            return {
+                "authenticated": False,
+                "requires_2fa": True,
+                "challenge_token": challenge,
+            }
+
+        return _issue_session_response(response, expected_pass, body.trust_browser)
+
+    @fastapi_app.post("/api/auth/verify-2fa")
+    async def auth_verify_2fa(body: Verify2FABody, response: Response) -> dict[str, object]:
+        expected_pass = settings.web_access_token.strip()
+        if not expected_pass:
+            return {"authenticated": True, "token": ""}
+        if not verify_2fa_challenge(expected_pass, body.challenge_token, body.code):
+            raise HTTPException(status_code=401, detail="Código 2FA inválido ou expirado.")
+        return _issue_session_response(response, expected_pass, body.trust_browser)
 
     @fastapi_app.post("/api/auth/logout")
     async def auth_logout(response: Response) -> dict[str, bool]:

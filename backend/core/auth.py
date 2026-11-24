@@ -10,7 +10,9 @@ import time
 from core.config import Settings, get_settings
 from fastapi import Cookie, Header, HTTPException, status
 
-SESSION_TTL_SECONDS = 7 * 24 * 3600
+SESSION_TTL_SECONDS = 8 * 3600
+TRUSTED_SESSION_TTL_SECONDS = 30 * 24 * 3600
+TWO_FA_TTL_SECONDS = 300
 
 
 def is_authorized_telegram_user(user_id: int | None, settings: Settings | None = None) -> bool:
@@ -53,6 +55,37 @@ def verify_session_or_access_token(provided: str | None, expected_secret: str) -
         ).hexdigest()
         return hmac.compare_digest(sig, expected_sig)
     return False
+
+
+def create_2fa_challenge(secret: str, code: str, ttl_seconds: int = TWO_FA_TTL_SECONDS) -> str:
+    """Gera desafio 2FA stateless (compatível com Vercel Serverless) assinado com HMAC-SHA256."""
+    exp = int(time.time()) + ttl_seconds
+    code_hash = hashlib.sha256(code.strip().encode("utf-8")).hexdigest()
+    payload = f"2fa:{exp}:{code_hash}"
+    sig = hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    return f"{exp}.{code_hash}.{sig}"
+
+
+def verify_2fa_challenge(secret: str, challenge_token: str, code: str) -> bool:
+    """Valida desafio 2FA stateless e o código aleatório de 6 dígitos."""
+    parts = challenge_token.split(".")
+    if len(parts) != 3:
+        return False
+    exp_str, expected_code_hash, sig = parts
+    try:
+        exp = int(exp_str)
+    except ValueError:
+        return False
+    if exp < int(time.time()):
+        return False
+    payload = f"2fa:{exp}:{expected_code_hash}"
+    expected_sig = hmac.new(
+        secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    if not hmac.compare_digest(sig, expected_sig):
+        return False
+    provided_hash = hashlib.sha256(code.strip().encode("utf-8")).hexdigest()
+    return hmac.compare_digest(provided_hash, expected_code_hash)
 
 
 def extract_provided_token(

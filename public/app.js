@@ -91,6 +91,9 @@ function App() {
   const [authenticated, setAuthenticated] = useState(true);
   const [loginUser, setLoginUser] = useState("");
   const [loginPass, setLoginPass] = useState("");
+  const [trustBrowser, setTrustBrowser] = useState(true);
+  const [twoFAChallenge, setTwoFAChallenge] = useState(null);
+  const [twoFACode, setTwoFACode] = useState("");
   const [loginError, setLoginError] = useState("");
   const [loginLoading, setLoginLoading] = useState(false);
   const [showPass, setShowPass] = useState(false);
@@ -270,13 +273,18 @@ function App() {
       const res = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: loginUser, password: loginPass }),
+        body: JSON.stringify({ username: loginUser, password: loginPass, trust_browser: trustBrowser }),
       });
       if (!res.ok) {
         setLoginError("Usuário ou senha incorretos.");
         return;
       }
       const data = await res.json();
+      if (data.requires_2fa) {
+        setTwoFAChallenge(data.challenge_token);
+        setTwoFACode("");
+        return;
+      }
       if (data.token) {
         localStorage.setItem("tpa_access_token", data.token);
         setAccessToken(data.token);
@@ -286,6 +294,41 @@ function App() {
       await loadAll();
     } catch {
       setLoginError("Erro de conexão ao autenticar.");
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const handleVerify2FA = async (e) => {
+    e.preventDefault();
+    setLoginError("");
+    setLoginLoading(true);
+    try {
+      const res = await fetch("/api/auth/verify-2fa", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          challenge_token: twoFAChallenge,
+          code: twoFACode,
+          trust_browser: trustBrowser,
+        }),
+      });
+      if (!res.ok) {
+        setLoginError("Código 2FA inválido ou expirado.");
+        return;
+      }
+      const data = await res.json();
+      if (data.token) {
+        localStorage.setItem("tpa_access_token", data.token);
+        setAccessToken(data.token);
+      }
+      setTwoFAChallenge(null);
+      setTwoFACode("");
+      setLoginPass("");
+      setAuthenticated(true);
+      await loadAll();
+    } catch {
+      setLoginError("Erro de conexão ao validar 2FA.");
     } finally {
       setLoginLoading(false);
     }
@@ -602,8 +645,49 @@ function App() {
             </button>
           </div>
 
-          <form onSubmit=${handleLogin} class="space-y-4">
-            ${usernameRequired && html`
+          ${twoFAChallenge ? html`
+            <form onSubmit=${handleVerify2FA} class="space-y-4">
+              <div class="p-3.5 rounded-2xl bg-royal-500/10 dark:bg-gold-500/10 border border-royal-500/20 dark:border-gold-500/20 text-xs">
+                📲 Enviamos um <strong>token aleatório de 6 dígitos</strong> para o seu Telegram.
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">Código 2FA</label>
+                <input
+                  required
+                  inputMode="numeric"
+                  maxLength="6"
+                  value=${twoFACode}
+                  onInput=${(e) => setTwoFACode(e.target.value)}
+                  placeholder="000000"
+                  class="w-full px-4 py-3 rounded-2xl bg-slate-100 dark:bg-obsidian-800 text-center text-xl font-extrabold tracking-[0.4em] tabular-nums outline-none"
+                />
+              </div>
+
+              ${loginError && html`
+                <div class="px-3.5 py-2.5 rounded-xl bg-rose-500/15 text-rose-500 text-xs font-semibold">
+                  ⚠️ ${loginError}
+                </div>
+              `}
+
+              <div class="flex gap-2">
+                <button
+                  type="button"
+                  onClick=${() => { setTwoFAChallenge(null); setLoginError(""); }}
+                  class="px-4 py-3 rounded-2xl bg-slate-200 dark:bg-obsidian-800 text-xs font-semibold"
+                >
+                  Voltar
+                </button>
+                <button
+                  type="submit"
+                  disabled=${loginLoading}
+                  class="flex-1 py-3 rounded-2xl bg-royal-600 hover:bg-royal-700 dark:bg-gradient-to-r dark:from-gold-400 dark:to-gold-500 text-white dark:text-obsidian-950 font-bold text-sm shadow-lg transition"
+                >
+                  ${loginLoading ? "Validando..." : "✅ Confirmar Token"}
+                </button>
+              </div>
+            </form>
+          ` : html`
+            <form onSubmit=${handleLogin} class="space-y-4">
               <div>
                 <label class="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">Usuário</label>
                 <input
@@ -615,43 +699,53 @@ function App() {
                   class="w-full px-4 py-3 rounded-2xl bg-slate-100 dark:bg-obsidian-800 border border-transparent focus:border-royal-500 dark:focus:border-gold-500 text-sm outline-none"
                 />
               </div>
-            `}
-            <div>
-              <label class="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">Senha de Acesso</label>
-              <div class="relative">
+              <div>
+                <label class="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">Senha de Acesso</label>
+                <div class="relative">
+                  <input
+                    required
+                    type=${showPass ? "text" : "password"}
+                    value=${loginPass}
+                    onInput=${(e) => setLoginPass(e.target.value)}
+                    placeholder="••••••••••••"
+                    autocomplete="current-password"
+                    class="w-full px-4 py-3 pr-11 rounded-2xl bg-slate-100 dark:bg-obsidian-800 border border-transparent focus:border-royal-500 dark:focus:border-gold-500 text-sm outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick=${() => setShowPass(!showPass)}
+                    class="absolute right-3 top-1/2 -translate-y-1/2 text-sm opacity-70 hover:opacity-100"
+                  >
+                    ${showPass ? "🙈" : "👁️"}
+                  </button>
+                </div>
+              </div>
+
+              <label class="flex items-center gap-2.5 text-xs text-slate-500 dark:text-slate-400 cursor-pointer select-none">
                 <input
-                  required
-                  type=${showPass ? "text" : "password"}
-                  value=${loginPass}
-                  onInput=${(e) => setLoginPass(e.target.value)}
-                  placeholder="••••••••••••"
-                  autocomplete="current-password"
-                  class="w-full px-4 py-3 pr-11 rounded-2xl bg-slate-100 dark:bg-obsidian-800 border border-transparent focus:border-royal-500 dark:focus:border-gold-500 text-sm outline-none"
+                  type="checkbox"
+                  checked=${trustBrowser}
+                  onChange=${(e) => setTrustBrowser(e.target.checked)}
+                  class="rounded accent-royal-600 dark:accent-gold-500"
                 />
-                <button
-                  type="button"
-                  onClick=${() => setShowPass(!showPass)}
-                  class="absolute right-3 top-1/2 -translate-y-1/2 text-sm opacity-70 hover:opacity-100"
-                >
-                  ${showPass ? "🙈" : "👁️"}
-                </button>
-              </div>
-            </div>
+                <span>Confiar neste navegador (manter conectado por 30 dias)</span>
+              </label>
 
-            ${loginError && html`
-              <div class="px-3.5 py-2.5 rounded-xl bg-rose-500/15 text-rose-500 text-xs font-semibold">
-                ⚠️ ${loginError}
-              </div>
-            `}
+              ${loginError && html`
+                <div class="px-3.5 py-2.5 rounded-xl bg-rose-500/15 text-rose-500 text-xs font-semibold">
+                  ⚠️ ${loginError}
+                </div>
+              `}
 
-            <button
-              type="submit"
-              disabled=${loginLoading}
-              class="w-full py-3 rounded-2xl bg-royal-600 hover:bg-royal-700 dark:bg-gradient-to-r dark:from-gold-400 dark:to-gold-500 text-white dark:text-obsidian-950 font-bold text-sm shadow-lg transition"
-            >
-              ${loginLoading ? "Entrando..." : "🔐 Entrar no Painel"}
-            </button>
-          </form>
+              <button
+                type="submit"
+                disabled=${loginLoading}
+                class="w-full py-3 rounded-2xl bg-royal-600 hover:bg-royal-700 dark:bg-gradient-to-r dark:from-gold-400 dark:to-gold-500 text-white dark:text-obsidian-950 font-bold text-sm shadow-lg transition"
+              >
+                ${loginLoading ? "Entrando..." : "🔐 Entrar no Painel"}
+              </button>
+            </form>
+          `}
         </div>
       </div>
     `;
