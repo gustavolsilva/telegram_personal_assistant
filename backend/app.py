@@ -7,12 +7,17 @@ import logging
 import secrets
 from contextlib import asynccontextmanager
 
-from core.auth import is_authorized_telegram_user
+from core.auth import (
+    create_session_token,
+    extract_provided_token,
+    is_authorized_telegram_user,
+    verify_session_or_access_token,
+)
 from core.config import PROJECT_ROOT, get_settings
 from core.database import DatabaseManager
 from core.router import ModuleRouter
 from core.telegram_storage import TelegramStorageManager
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import Cookie, FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -20,6 +25,7 @@ from modules.finance.api import create_finance_router
 from modules.finance.handlers import FinanceModule
 from modules.finance.seed import seed_defaults
 from modules.finance.service import FinanceService
+from pydantic import BaseModel
 from telegram import BotCommand, Update
 from telegram.ext import (
     Application,
@@ -35,6 +41,11 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 logger = logging.getLogger("assistant")
+
+
+class LoginBody(BaseModel):
+    username: str = ""
+    password: str
 
 
 def _build_telegram_app(
@@ -227,6 +238,49 @@ def create_app() -> FastAPI:
     async def health() -> dict[str, str]:
         await _ensure_initialized()
         return {"status": "ok", "mode": "vercel" if settings.is_vercel else "local"}
+
+    @fastapi_app.get("/api/auth/status")
+    async def auth_status(
+        x_access_token: str | None = Header(default=None),
+        authorization: str | None = Header(default=None),
+        tpa_session: str | None = Cookie(default=None),
+    ) -> dict[str, bool]:
+        expected = settings.web_access_token.strip()
+        if not expected:
+            return {"auth_required": False, "authenticated": True, "username_required": False}
+        provided = extract_provided_token(x_access_token, authorization, tpa_session)
+        return {
+            "auth_required": True,
+            "authenticated": verify_session_or_access_token(provided, expected),
+            "username_required": bool(settings.web_access_user.strip()),
+        }
+
+    @fastapi_app.post("/api/auth/login")
+    async def auth_login(body: LoginBody, response: Response) -> dict[str, object]:
+        expected_pass = settings.web_access_token.strip()
+        expected_user = settings.web_access_user.strip()
+        if not expected_pass:
+            return {"authenticated": True, "token": ""}
+        if expected_user and not secrets.compare_digest(body.username.strip(), expected_user):
+            raise HTTPException(status_code=401, detail="Usuário ou senha incorretos.")
+        if not secrets.compare_digest(body.password, expected_pass):
+            raise HTTPException(status_code=401, detail="Usuário ou senha incorretos.")
+
+        session_tok = create_session_token(expected_pass)
+        response.set_cookie(
+            key="tpa_session",
+            value=session_tok,
+            httponly=True,
+            samesite="lax",
+            secure=settings.is_vercel,
+            max_age=7 * 24 * 3600,
+        )
+        return {"authenticated": True, "token": session_tok}
+
+    @fastapi_app.post("/api/auth/logout")
+    async def auth_logout(response: Response) -> dict[str, bool]:
+        response.delete_cookie("tpa_session")
+        return {"ok": True}
 
     @fastapi_app.post("/api/telegram/webhook")
     async def telegram_webhook(

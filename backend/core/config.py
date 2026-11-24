@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     # Servidor Web / PWA
     web_host: str = "127.0.0.1"
     web_port: int = 8000
+    web_access_user: str = ""
     web_access_token: str = ""
     public_url: str = ""
 

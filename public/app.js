@@ -85,6 +85,16 @@ function DeltaPill({ pct, invertColors = false }) {
 }
 
 function App() {
+  const [authChecked, setAuthChecked] = useState(false);
+  const [authRequired, setAuthRequired] = useState(false);
+  const [usernameRequired, setUsernameRequired] = useState(false);
+  const [authenticated, setAuthenticated] = useState(true);
+  const [loginUser, setLoginUser] = useState("");
+  const [loginPass, setLoginPass] = useState("");
+  const [loginError, setLoginError] = useState("");
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [showPass, setShowPass] = useState(false);
+
   const [tab, setTab] = useState("overview");
   const [period, setPeriod] = useState("month");
   const [isDark, setIsDark] = useState(() => (localStorage.getItem("tpa_theme") || "dark") === "dark");
@@ -235,8 +245,58 @@ function App() {
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("/sw.js").catch(() => {});
     }
-    loadAll();
+    (async () => {
+      try {
+        const status = await apiFetch("/api/auth/status");
+        setAuthRequired(Boolean(status.auth_required));
+        setUsernameRequired(Boolean(status.username_required));
+        setAuthenticated(Boolean(status.authenticated));
+        setAuthChecked(true);
+        if (status.authenticated) {
+          await loadAll();
+        }
+      } catch {
+        setAuthChecked(true);
+        await loadAll();
+      }
+    })();
   }, [loadAll]);
+
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    setLoginError("");
+    setLoginLoading(true);
+    try {
+      const res = await fetch("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: loginUser, password: loginPass }),
+      });
+      if (!res.ok) {
+        setLoginError("Usuário ou senha incorretos.");
+        return;
+      }
+      const data = await res.json();
+      if (data.token) {
+        localStorage.setItem("tpa_access_token", data.token);
+        setAccessToken(data.token);
+      }
+      setLoginPass("");
+      setAuthenticated(true);
+      await loadAll();
+    } catch {
+      setLoginError("Erro de conexão ao autenticar.");
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    localStorage.removeItem("tpa_access_token");
+    setAccessToken("");
+    await fetch("/api/auth/logout", { method: "POST" }).catch(() => {});
+    if (authRequired) setAuthenticated(false);
+  };
 
   const openModalWithType = (type) => {
     const ct = type === "transfer" ? "expense" : type;
@@ -512,6 +572,91 @@ function App() {
   const burnPct = incomeCents > 0 ? Math.min(100, Math.round((expenseCents / incomeCents) * 100)) : 0;
   const modalCategories = categories.filter((c) => c.type === (txForm.tx_type === "transfer" ? "expense" : txForm.tx_type));
 
+  if (!authChecked) {
+    return html`
+      <div class="min-h-screen flex items-center justify-center mesh-bg">
+        <div class="text-sm font-semibold text-slate-400 animate-pulse">Verificando acesso seguro...</div>
+      </div>
+    `;
+  }
+
+  if (authRequired && !authenticated) {
+    return html`
+      <div class="min-h-screen flex items-center justify-center mesh-bg p-4">
+        <div class="w-full max-w-md p-7 rounded-3xl bg-white/95 dark:bg-obsidian-900/95 backdrop-blur-xl border border-blue-100 dark:border-gold-500/25 shadow-2xl animate-enter">
+          <div class="flex items-center justify-between mb-6">
+            <div class="flex items-center gap-3">
+              <div class="w-11 h-11 rounded-2xl bg-gradient-to-br from-royal-500 to-royal-700 dark:from-gold-400 dark:to-gold-600 flex items-center justify-center text-white dark:text-obsidian-950 font-extrabold text-lg shadow-lg">F</div>
+              <div>
+                <h1 class="font-extrabold text-lg tracking-tight">Finanças AI</h1>
+                <p class="text-xs text-slate-400">Acesso Privado Protegido</p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick=${() => setIsDark(!isDark)}
+              class="p-2 rounded-xl bg-slate-100 dark:bg-obsidian-800 text-sm"
+              title="Alternar tema"
+            >
+              ${isDark ? "☀️" : "🌙"}
+            </button>
+          </div>
+
+          <form onSubmit=${handleLogin} class="space-y-4">
+            ${usernameRequired && html`
+              <div>
+                <label class="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">Usuário</label>
+                <input
+                  required
+                  value=${loginUser}
+                  onInput=${(e) => setLoginUser(e.target.value)}
+                  placeholder="Seu usuário"
+                  autocomplete="username"
+                  class="w-full px-4 py-3 rounded-2xl bg-slate-100 dark:bg-obsidian-800 border border-transparent focus:border-royal-500 dark:focus:border-gold-500 text-sm outline-none"
+                />
+              </div>
+            `}
+            <div>
+              <label class="block text-xs font-semibold text-slate-500 dark:text-slate-400 mb-1.5">Senha de Acesso</label>
+              <div class="relative">
+                <input
+                  required
+                  type=${showPass ? "text" : "password"}
+                  value=${loginPass}
+                  onInput=${(e) => setLoginPass(e.target.value)}
+                  placeholder="••••••••••••"
+                  autocomplete="current-password"
+                  class="w-full px-4 py-3 pr-11 rounded-2xl bg-slate-100 dark:bg-obsidian-800 border border-transparent focus:border-royal-500 dark:focus:border-gold-500 text-sm outline-none"
+                />
+                <button
+                  type="button"
+                  onClick=${() => setShowPass(!showPass)}
+                  class="absolute right-3 top-1/2 -translate-y-1/2 text-sm opacity-70 hover:opacity-100"
+                >
+                  ${showPass ? "🙈" : "👁️"}
+                </button>
+              </div>
+            </div>
+
+            ${loginError && html`
+              <div class="px-3.5 py-2.5 rounded-xl bg-rose-500/15 text-rose-500 text-xs font-semibold">
+                ⚠️ ${loginError}
+              </div>
+            `}
+
+            <button
+              type="submit"
+              disabled=${loginLoading}
+              class="w-full py-3 rounded-2xl bg-royal-600 hover:bg-royal-700 dark:bg-gradient-to-r dark:from-gold-400 dark:to-gold-500 text-white dark:text-obsidian-950 font-bold text-sm shadow-lg transition"
+            >
+              ${loginLoading ? "Entrando..." : "🔐 Entrar no Painel"}
+            </button>
+          </form>
+        </div>
+      </div>
+    `;
+  }
+
   return html`
     <div class="min-h-screen flex mesh-bg">
       <!-- SIDEBAR (FIXA OU AUTOHIDE — PRETO/DOURADO NO DARK, BRANCO/AZUL NO LIGHT) -->
@@ -639,6 +784,16 @@ function App() {
             >
               ${isDark ? "☀️" : "🌙"}
             </button>
+
+            ${authRequired && html`
+              <button
+                onClick=${handleLogout}
+                class="p-2.5 rounded-xl bg-white dark:bg-obsidian-900 border border-slate-200 dark:border-white/10 hover:text-rose-500 transition text-xs font-semibold"
+                title="Sair / Bloquear painel"
+              >
+                🔒
+              </button>
+            `}
           </div>
         </header>
 
