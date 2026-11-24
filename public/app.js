@@ -278,7 +278,8 @@ function App() {
         body: JSON.stringify({ username: loginUser, password: loginPass, trust_browser: trustBrowser }),
       });
       if (!res.ok) {
-        setLoginError("Usuário ou senha incorretos.");
+        const errData = await res.json().catch(() => ({}));
+        setLoginError(errData.detail || "Usuário ou senha incorretos.");
         return;
       }
       const data = await res.json();
@@ -316,7 +317,8 @@ function App() {
         }),
       });
       if (!res.ok) {
-        setLoginError("Código 2FA inválido ou expirado.");
+        const errData = await res.json().catch(() => ({}));
+        setLoginError(errData.detail || "Código 2FA inválido ou expirado.");
         return;
       }
       const data = await res.json();
