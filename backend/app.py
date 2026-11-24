@@ -21,6 +21,7 @@ from core.config import PROJECT_ROOT, get_settings
 from core.database import DatabaseManager
 from core.router import ModuleRouter
 from core.telegram_storage import TelegramStorageManager
+from core.voice import VoiceTranscriptionError, transcribe_audio
 from fastapi import Cookie, FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -102,6 +103,56 @@ def _build_telegram_app(
                 "Não identifiquei um valor nessa mensagem. Ex: '45,90 almoço nubank' ou /ajuda."
             )
 
+    async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user = update.effective_user
+        if not is_authorized_telegram_user(user.id if user else None):
+            return
+        msg = update.effective_message
+        if msg is None:
+            return
+        media = msg.voice or msg.audio
+        if media is None:
+            return
+
+        settings = get_settings()
+        try:
+            tg_file = await media.get_file()
+            audio_bytes = bytes(await tg_file.download_as_bytearray())
+            mime_type = getattr(media, "mime_type", None) or "audio/ogg"
+            filename = getattr(media, "file_name", None) or "voice.ogg"
+            transcript = await transcribe_audio(
+                audio_bytes,
+                filename=filename,
+                mime_type=mime_type,
+                groq_api_key=settings.groq_api_key,
+                gemini_api_key=settings.gemini_api_key,
+            )
+        except VoiceTranscriptionError as exc:
+            await msg.reply_text(f"⚠️ {exc}")
+            return
+        except Exception:
+            logger.exception("Erro inesperado ao processar áudio do Telegram.")
+            await msg.reply_text("⚠️ Não consegui processar esse áudio agora. Tente novamente.")
+            return
+
+        if not transcript:
+            await msg.reply_text("🎙️ Não consegui entender o áudio. Tente falar mais perto do microfone.")
+            return
+
+        if getattr(context, "user_data", None) is not None:
+            context.user_data["_pending_voice_bytes"] = audio_bytes
+        try:
+            handled = await router.dispatch_text(transcript, update, context)
+        finally:
+            if getattr(context, "user_data", None) is not None:
+                context.user_data.pop("_pending_voice_bytes", None)
+
+        if not handled:
+            await msg.reply_text(
+                f'🎙️ Entendi: "{transcript}"\n\n'
+                "Não identifiquei um valor para lançar. Ex: '45,90 almoço nubank'."
+            )
+
     async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
         if not is_authorized_telegram_user(user.id if user else None):
@@ -113,6 +164,7 @@ def _build_telegram_app(
         app.add_handler(CommandHandler(spec.command, on_command))
     app.add_handler(CommandHandler("start", on_command))
     app.add_handler(CallbackQueryHandler(on_callback))
+    app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     return app
 

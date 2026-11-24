@@ -7,6 +7,7 @@ from typing import Any
 
 from core.auth import verify_web_access_token
 from core.telegram_storage import format_brl_cents
+from core.voice import normalize_spoken_ptbr
 from fastapi import APIRouter, Depends, HTTPException, Query
 from modules.finance.parser import parse_finance_question, parse_ptbr_transaction
 from modules.finance.service import FinanceService, TransactionInput
@@ -308,7 +309,7 @@ def create_finance_router(service: FinanceService) -> APIRouter:
     @router.post("/chat")
     async def chat_with_assistant(body: ChatMessageBody) -> dict[str, Any]:
         """Mecanismo conversacional unificado no Dashboard (estilo regis.chat)."""
-        text = body.message.strip()
+        text = normalize_spoken_ptbr(body.message)
         cats, accs = await service.get_match_targets()
 
         question = parse_finance_question(text, accs)

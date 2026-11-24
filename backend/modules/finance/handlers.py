@@ -465,6 +465,13 @@ class FinanceModule(AssistantModule):
         if parsed is None or parsed.category_id is None or parsed.account_id is None:
             return False
 
+        voice_bytes: bytes | None = None
+        if getattr(context, "user_data", None) is not None:
+            voice_bytes = context.user_data.pop("_pending_voice_bytes", None)
+        is_voice = voice_bytes is not None or bool(
+            getattr(msg, "voice", None) or getattr(msg, "audio", None)
+        )
+
         tx_input = TransactionInput(
             tx_type=parsed.tx_type,
             amount_cents=parsed.amount_cents,
@@ -472,7 +479,7 @@ class FinanceModule(AssistantModule):
             category_id=parsed.category_id,
             account_id=parsed.account_id,
             occurred_at=parsed.occurred_at,
-            source="telegram_text",
+            source="telegram_voice" if is_voice else "telegram_text",
             source_msg_id=msg.message_id,
             installments_total=parsed.installments_total,
             transfer_to_account_id=parsed.transfer_to_account_id,
@@ -499,7 +506,7 @@ class FinanceModule(AssistantModule):
             )
             return True
 
-        tx = await self.service.create_transaction(tx_input)
+        tx = await self.service.create_transaction(tx_input, voice_bytes=voice_bytes)
         await msg.reply_html(
             _format_tx_reply(tx, dashboard_url=self.web_dashboard_url),
             reply_markup=_tx_keyboard(tx.id, self.web_dashboard_url),
