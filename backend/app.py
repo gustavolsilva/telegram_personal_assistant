@@ -249,7 +249,9 @@ def create_app() -> FastAPI:
             await tg_app.process_update(update)
         return {"ok": True}
 
-    web_dir = PROJECT_ROOT / "web"
+    web_dir = PROJECT_ROOT / "public"
+    if not web_dir.exists():
+        web_dir = PROJECT_ROOT / "web"
     if web_dir.exists():
         @fastapi_app.get("/")
         async def serve_index() -> FileResponse:

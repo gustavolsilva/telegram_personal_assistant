@@ -42,6 +42,3 @@ extraPaths = ["backend"]
 venvPath = "."
 venv = ".venv"
 
-[tool.vercel]
-entrypoint = "api/index.py"
-
