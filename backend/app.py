@@ -301,9 +301,9 @@ def create_app() -> FastAPI:
         expected_user = (settings.web_access_user.strip() or "admin")
         if not expected_pass:
             return {"authenticated": True, "requires_2fa": False, "token": ""}
-        if not secrets.compare_digest(body.username.strip(), expected_user):
+        if not secrets.compare_digest(body.username.strip().lower(), expected_user.lower()):
             raise HTTPException(status_code=401, detail="Usuário ou senha incorretos.")
-        if not secrets.compare_digest(body.password, expected_pass):
+        if not secrets.compare_digest(body.password.strip(), expected_pass):
             raise HTTPException(status_code=401, detail="Usuário ou senha incorretos.")
 
         if settings.web_2fa_enabled:
@@ -312,6 +312,7 @@ def create_app() -> FastAPI:
                     status_code=503,
                     detail="2FA ativo, mas TELEGRAM_BOT_TOKEN ou TELEGRAM_USER_ID não configurado.",
                 )
+            await _ensure_tg_initialized()
             code = f"{secrets.randbelow(1_000_000):06d}"
             challenge = create_2fa_challenge(expected_pass, code)
             await tg_app.bot.send_message(
