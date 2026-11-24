@@ -312,18 +312,25 @@ def create_app() -> FastAPI:
                     status_code=503,
                     detail="2FA ativo, mas TELEGRAM_BOT_TOKEN ou TELEGRAM_USER_ID não configurado.",
                 )
-            await _ensure_tg_initialized()
             code = f"{secrets.randbelow(1_000_000):06d}"
             challenge = create_2fa_challenge(expected_pass, code)
-            await tg_app.bot.send_message(
-                chat_id=settings.telegram_user_id,
-                text=(
-                    f"🔐 <b>Código 2FA de Acesso ao Painel</b>\n\n"
-                    f"Seu token aleatório: <code>{code}</code>\n"
-                    f"⏱️ Válido por 5 minutos."
-                ),
-                parse_mode="HTML",
-            )
+            try:
+                await _ensure_tg_initialized()
+                await tg_app.bot.send_message(
+                    chat_id=settings.telegram_user_id,
+                    text=(
+                        f"🔐 <b>Código 2FA de Acesso ao Painel</b>\n\n"
+                        f"Seu token aleatório: <code>{code}</code>\n"
+                        f"⏱️ Válido por 5 minutos."
+                    ),
+                    parse_mode="HTML",
+                )
+            except Exception as exc:
+                logger.exception("Falha ao enviar código 2FA no Telegram.")
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Falha ao enviar código 2FA no Telegram ({type(exc).__name__}): {exc}",
+                ) from exc
             return {
                 "authenticated": False,
                 "requires_2fa": True,
