@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from core.telegram_storage import TelegramStorageManager
+from modules.finance.importer import parse_statement_text
 from modules.finance.models import (
     Account,
     Category,
@@ -18,7 +19,7 @@ from modules.finance.models import (
     Transaction,
     generate_uuid7,
 )
-from modules.finance.parser import AccountMatchTarget, CategoryMatchTarget
+from modules.finance.parser import AccountMatchTarget, CategoryMatchTarget, parse_ptbr_transaction
 from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import selectinload
@@ -55,6 +56,7 @@ class TransactionInput:
     transfer_to_account_id: str | None = None
     is_paid: bool = True
     billing_month: str | None = None
+    external_fitid: str | None = None
 
 
 class FinanceService:
@@ -121,6 +123,7 @@ class FinanceService:
                 billing_month=bill_month,
                 source=data.source,
                 source_msg_id=data.source_msg_id,
+                external_fitid=data.external_fitid,
                 notes=data.notes,
             )
             session.add(tx)
@@ -1125,6 +1128,118 @@ class FinanceService:
                 self.storage.schedule_snapshot()
         budgets = await self.list_budgets()
         return next((b for b in budgets if b["category_id"] == category_id), None)
+
+    async def preview_import(
+        self,
+        *,
+        account_id: str,
+        filename: str,
+        content_text: str,
+    ) -> list[dict[str, Any]]:
+        rows = parse_statement_text(filename, content_text)
+        if not rows:
+            return []
+
+        cats, _ = await self.get_match_targets()
+        fitids = [r.fitid for r in rows]
+
+        async with self.session_factory() as session:
+            existing_fitids = set(
+                (
+                    await session.scalars(
+                        select(Transaction.external_fitid).where(
+                            Transaction.deleted_at.is_(None),
+                            Transaction.account_id == account_id,
+                            Transaction.external_fitid.in_(fitids),
+                        )
+                    )
+                ).all()
+            )
+            recent_txs = (
+                await session.execute(
+                    select(Transaction.occurred_at, Transaction.amount_cents, Transaction.type).where(
+                        Transaction.deleted_at.is_(None),
+                        Transaction.account_id == account_id,
+                    )
+                )
+            ).all()
+
+        seen_day_amt = {
+            (
+                (occ if occ.tzinfo else occ.replace(tzinfo=UTC)).date().isoformat(),
+                amt,
+                t_type,
+            )
+            for occ, amt, t_type in recent_txs
+        }
+
+        preview: list[dict[str, Any]] = []
+        fallback_exp = next((c.id for c in cats if c.type == "expense"), "")
+        fallback_inc = next((c.id for c in cats if c.type == "income"), fallback_exp)
+        for r in rows:
+            sign = "+" if r.tx_type == "income" else "-"
+            parsed = parse_ptbr_transaction(
+                f"{sign}{r.amount_cents / 100:.2f} {r.description}",
+                cats,
+                [],
+            )
+            cat_id = (
+                parsed.category_id
+                if parsed and parsed.category_id
+                else (fallback_inc if r.tx_type == "income" else fallback_exp)
+            )
+            day_key = (r.occurred_at.date().isoformat(), r.amount_cents, r.tx_type)
+            is_dup = r.fitid in existing_fitids or day_key in seen_day_amt
+            preview.append(
+                {
+                    "fitid": r.fitid,
+                    "occurred_at": r.occurred_at.isoformat(),
+                    "tx_type": r.tx_type,
+                    "amount_cents": r.amount_cents,
+                    "description": r.description,
+                    "category_id": cat_id,
+                    "is_duplicate": is_dup,
+                }
+            )
+        return preview
+
+    async def confirm_import(
+        self,
+        *,
+        account_id: str,
+        items: list[dict[str, Any]],
+    ) -> int:
+        if not items:
+            return 0
+        async with self.session_factory() as session:
+            acc = await session.get(Account, account_id)
+            if acc is None:
+                return 0
+            closing_day = acc.closing_day if acc.type == "credit" else None
+            is_credit = acc.type == "credit"
+            created_count = 0
+            for it in items:
+                occ = datetime.fromisoformat(str(it["occurred_at"]))
+                if occ.tzinfo is None:
+                    occ = occ.replace(tzinfo=UTC)
+                tx = Transaction(
+                    type=str(it["tx_type"]),
+                    amount_cents=int(it["amount_cents"]),
+                    description=str(it["description"])[:255],
+                    category_id=str(it["category_id"]),
+                    account_id=account_id,
+                    occurred_at=occ,
+                    is_paid=True,
+                    billing_month=_billing_month_for(occ, closing_day) if is_credit else None,
+                    source="web",
+                    external_fitid=str(it.get("fitid") or "") or None,
+                )
+                session.add(tx)
+                created_count += 1
+            await session.commit()
+        if self.storage is not None and created_count > 0:
+            self.storage.schedule_snapshot()
+        return created_count
 
     async def create_recurring_bill(
         self,

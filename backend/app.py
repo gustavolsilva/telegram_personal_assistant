@@ -20,8 +20,8 @@ from core.auth import (
 from core.config import PROJECT_ROOT, get_settings
 from core.database import DatabaseManager
 from core.router import ModuleRouter
-from core.telegram_storage import TelegramStorageManager
-from core.voice import VoiceTranscriptionError, transcribe_audio
+from core.telegram_storage import TelegramStorageManager, format_brl_cents
+from core.voice import VoiceTranscriptionError, extract_receipt_command, transcribe_audio
 from fastapi import Cookie, FastAPI, Header, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -153,6 +153,50 @@ def _build_telegram_app(
                 "Não identifiquei um valor para lançar. Ex: '45,90 almoço nubank'."
             )
 
+    async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user = update.effective_user
+        if not is_authorized_telegram_user(user.id if user else None):
+            return
+        msg = update.effective_message
+        if msg is None or not msg.photo:
+            return
+
+        settings = get_settings()
+        try:
+            tg_file = await msg.photo[-1].get_file()
+            photo_bytes = bytes(await tg_file.download_as_bytearray())
+            caption = (getattr(msg, "caption", None) or "").strip()
+            extracted = await extract_receipt_command(
+                photo_bytes,
+                gemini_api_key=settings.gemini_api_key,
+            )
+            phrase = f"{extracted} {caption}".strip() if caption else extracted
+        except VoiceTranscriptionError as exc:
+            await msg.reply_text(f"⚠️ {exc}")
+            return
+        except Exception:
+            logger.exception("Erro inesperado ao processar foto/comprovante.")
+            await msg.reply_text("⚠️ Não consegui ler esse comprovante agora. Tente novamente.")
+            return
+
+        if not phrase:
+            await msg.reply_text("🧾 Não consegui identificar um lançamento nessa imagem.")
+            return
+
+        if getattr(context, "user_data", None) is not None:
+            context.user_data["_pending_photo_bytes"] = photo_bytes
+        try:
+            handled = await router.dispatch_text(phrase, update, context)
+        finally:
+            if getattr(context, "user_data", None) is not None:
+                context.user_data.pop("_pending_photo_bytes", None)
+
+        if not handled:
+            await msg.reply_text(
+                f'🧾 Li da imagem: "{phrase}"\n\n'
+                "Não identifiquei um valor válido para lançar. Tente adicionar uma legenda como '45,90 almoço pix'."
+            )
+
     async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         user = update.effective_user
         if not is_authorized_telegram_user(user.id if user else None):
@@ -165,6 +209,7 @@ def _build_telegram_app(
     app.add_handler(CommandHandler("start", on_command))
     app.add_handler(CallbackQueryHandler(on_callback))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, on_voice))
+    app.add_handler(MessageHandler(filters.PHOTO, on_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
     return app
 
@@ -426,6 +471,39 @@ def create_app() -> FastAPI:
         if update is not None:
             await tg_app.process_update(update)
         return {"ok": True}
+
+    @fastapi_app.get("/api/cron/daily-digest")
+    async def cron_daily_digest(
+        authorization: str | None = Header(default=None),
+    ) -> dict[str, object]:
+        expected_cron = settings.cron_secret.strip()
+        if expected_cron:
+            expected_hdr = f"Bearer {expected_cron}"
+            if not authorization or not secrets.compare_digest(authorization.strip(), expected_hdr):
+                raise HTTPException(status_code=403, detail="Cron secret inválido.")
+
+        await _ensure_db_initialized()
+        upcoming = await finance_service.get_upcoming_dues(days_ahead=3)
+        urgent = [u for u in upcoming if u["days_until_due"] <= 3]
+        if not urgent or tg_app is None or settings.telegram_user_id is None:
+            return {"sent": False, "urgent_count": len(urgent)}
+
+        lines = ["⏰ <b>Lembrete Diário de Vencimentos</b>\n"]
+        for u in urgent:
+            when = (
+                "ATRASADO"
+                if u["days_until_due"] < 0
+                else ("Vence HOJE" if u["days_until_due"] == 0 else f"Em {u['days_until_due']}d")
+            )
+            lines.append(f"• <b>{u['title']}</b>: {format_brl_cents(u['amount_cents'])} ({when})")
+
+        await _ensure_tg_initialized()
+        await tg_app.bot.send_message(
+            chat_id=settings.telegram_user_id,
+            text="\n".join(lines),
+            parse_mode="HTML",
+        )
+        return {"sent": True, "urgent_count": len(urgent)}
 
     web_dir = PROJECT_ROOT / "public"
     if not web_dir.exists():

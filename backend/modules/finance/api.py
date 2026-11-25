@@ -75,6 +75,26 @@ class BudgetUpsertBody(BaseModel):
     limit_cents: int = Field(ge=0)
 
 
+class ImportPreviewBody(BaseModel):
+    account_id: str
+    filename: str
+    content_text: str
+
+
+class ImportConfirmItem(BaseModel):
+    fitid: str | None = None
+    occurred_at: str
+    tx_type: str = Field(pattern="^(expense|income)$")
+    amount_cents: int = Field(gt=0)
+    description: str = Field(min_length=1, max_length=255)
+    category_id: str
+
+
+class ImportConfirmBody(BaseModel):
+    account_id: str
+    items: list[ImportConfirmItem]
+
+
 class BalanceAdjustBody(BaseModel):
     target_balance_cents: int
 
@@ -401,6 +421,22 @@ def create_finance_router(service: FinanceService) -> APIRouter:
         if res is None:
             raise HTTPException(status_code=404, detail="Categoria não encontrada.")
         return res
+
+    @router.post("/import/preview")
+    async def preview_import(body: ImportPreviewBody) -> list[dict[str, Any]]:
+        return await service.preview_import(
+            account_id=body.account_id,
+            filename=body.filename,
+            content_text=body.content_text,
+        )
+
+    @router.post("/import/confirm")
+    async def confirm_import(body: ImportConfirmBody) -> dict[str, int]:
+        count = await service.confirm_import(
+            account_id=body.account_id,
+            items=[item.model_dump() for item in body.items],
+        )
+        return {"imported": count}
 
     @router.get("/bills")
     async def list_bills() -> list[dict[str, Any]]:

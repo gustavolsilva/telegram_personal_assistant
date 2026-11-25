@@ -105,6 +105,7 @@ class Transaction(Base):
     channel_msg_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     receipt_file_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     receipt_file_unique_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    external_fitid: Mapped[str | None] = mapped_column(String(120), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(

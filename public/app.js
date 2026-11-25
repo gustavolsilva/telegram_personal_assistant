@@ -132,6 +132,7 @@ function App() {
   const [accountForm, setAccountForm] = useState({ name: "", type: "checking", initial_balance: "" });
   const [budgets, setBudgets] = useState([]);
   const [invoiceModal, setInvoiceModal] = useState(null);
+  const [importModal, setImportModal] = useState(null);
   const [catForm, setCatForm] = useState({ id: null, name: "", type: "expense", icon: "📦", color: "#6366f1", keywords: "" });
 
   const [search, setSearch] = useState("");
@@ -1660,6 +1661,12 @@ function App() {
                 ${accounts.map((a) => html`<option key=${a.id} value=${a.id}>${a.name}</option>`)}
               </select>
               <button onClick=${exportCSV} class="px-3.5 py-2 rounded-xl bg-slate-200 dark:bg-obsidian-800 text-xs font-semibold hover:opacity-80">⬇ CSV</button>
+              <button
+                onClick=${() => setImportModal({ accountId: accounts[0]?.id || "", filename: "", rows: [], loading: false })}
+                class="px-3.5 py-2 rounded-xl bg-royal-600 dark:bg-gold-500 text-white dark:text-obsidian-950 text-xs font-bold hover:opacity-90"
+              >
+                📥 Importar OFX/CSV
+              </button>
             </div>
 
             <div class="space-y-4">
@@ -2033,6 +2040,124 @@ function App() {
                 <button type="submit" class="px-4 py-2 rounded-xl bg-emerald-500 text-white text-xs font-bold">Pagar Fatura</button>
               </form>
             `}
+          </div>
+        </div>
+      `}
+
+      <!-- MODAL IMPORTAÇÃO OFX / CSV -->
+      ${importModal && html`
+        <div class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div class="w-full max-w-2xl p-6 rounded-3xl bg-white dark:bg-obsidian-900 border border-slate-200 dark:border-white/10 shadow-2xl space-y-4 max-h-[85vh] flex flex-col">
+            <div class="flex items-center justify-between">
+              <h3 class="text-lg font-bold">📥 Importar Extrato Bancário (OFX / CSV)</h3>
+              <button onClick=${() => setImportModal(null)} class="p-1.5 text-slate-400 hover:text-rose-500">✕</button>
+            </div>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <select
+                value=${importModal.accountId}
+                onChange=${(e) => setImportModal((p) => ({ ...p, accountId: e.target.value }))}
+                class="px-3.5 py-2.5 rounded-xl bg-slate-100 dark:bg-obsidian-800 text-xs"
+              >
+                ${accounts.map((a) => html`<option key=${a.id} value=${a.id}>Conta: ${a.name}</option>`)}
+              </select>
+              <input
+                type="file"
+                accept=".ofx,.csv,.txt"
+                onChange=${async (e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  setImportModal((p) => ({ ...p, loading: true, filename: file.name }));
+                  const text = await file.text();
+                  const rows = await apiFetch("/api/finance/import/preview", {
+                    method: "POST",
+                    body: JSON.stringify({
+                      account_id: importModal.accountId || accounts[0]?.id,
+                      filename: file.name,
+                      content_text: text,
+                    }),
+                  });
+                  setImportModal((p) => ({
+                    ...p,
+                    loading: false,
+                    rows: rows.map((r) => ({ ...r, selected: !r.is_duplicate })),
+                  }));
+                }}
+                class="text-xs file:mr-3 file:py-2 file:px-3 file:rounded-xl file:border-0 file:bg-emerald-500 file:text-white file:font-semibold"
+              />
+            </div>
+
+            <div class="flex-1 overflow-y-auto divide-y divide-slate-100 dark:divide-white/5 pr-1">
+              ${importModal.loading
+                ? html`<p class="text-xs text-slate-400 py-8 text-center animate-pulse">Analisando extrato...</p>`
+                : importModal.rows.length
+                ? importModal.rows.map((r, idx) => html`
+                    <div key=${r.fitid + idx} class="py-2.5 flex items-center justify-between gap-3 text-xs">
+                      <label class="flex items-center gap-2.5 min-w-0 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked=${r.selected}
+                          onChange=${(e) => setImportModal((p) => ({
+                            ...p,
+                            rows: p.rows.map((x, i) => (i === idx ? { ...x, selected: e.target.checked } : x)),
+                          }))}
+                          class="rounded accent-emerald-500"
+                        />
+                        <div class="min-w-0">
+                          <div class="font-semibold truncate flex items-center gap-1.5">
+                            <span>${r.description}</span>
+                            ${r.is_duplicate && html`<span class="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-500 text-[10px]">Possível duplicata</span>`}
+                          </div>
+                          <div class="text-slate-400">${new Date(r.occurred_at).toLocaleDateString("pt-BR")}</div>
+                        </div>
+                      </label>
+                      <div class="flex items-center gap-2 shrink-0">
+                        <select
+                          value=${r.category_id}
+                          onChange=${(e) => setImportModal((p) => ({
+                            ...p,
+                            rows: p.rows.map((x, i) => (i === idx ? { ...x, category_id: e.target.value } : x)),
+                          }))}
+                          class="px-2 py-1 rounded-lg bg-slate-100 dark:bg-obsidian-800 text-[11px]"
+                        >
+                          ${categories.filter((c) => c.type === r.tx_type).map((c) => html`<option key=${c.id} value=${c.id}>${c.icon} ${c.name}</option>`)}
+                        </select>
+                        <strong class=${`tabular-nums ${r.tx_type === "income" ? "text-emerald-500" : "text-rose-500"}`}>
+                          ${r.tx_type === "income" ? "+" : "-"}${showMoney(r.amount_cents)}
+                        </strong>
+                      </div>
+                    </div>
+                  `)
+                : html`<p class="text-xs text-slate-400 py-8 text-center">Selecione um arquivo .ofx ou .csv do seu banco para pré-visualizar.</p>`}
+            </div>
+
+            <div class="flex items-center justify-between pt-2 border-t border-slate-100 dark:border-white/10">
+              <span class="text-xs text-slate-400">
+                ${importModal.rows.filter((r) => r.selected).length} selecionados
+              </span>
+              <div class="flex gap-2">
+                <button onClick=${() => setImportModal(null)} class="px-4 py-2 rounded-xl bg-slate-200 dark:bg-obsidian-800 text-xs font-medium">Cancelar</button>
+                <button
+                  disabled=${importModal.rows.filter((r) => r.selected).length === 0}
+                  onClick=${async () => {
+                    const selected = importModal.rows.filter((r) => r.selected);
+                    const res = await apiFetch("/api/finance/import/confirm", {
+                      method: "POST",
+                      body: JSON.stringify({
+                        account_id: importModal.accountId || accounts[0]?.id,
+                        items: selected,
+                      }),
+                    });
+                    showToast(`📥 ${res.imported} lançamentos importados!`);
+                    setImportModal(null);
+                    await loadAll();
+                  }}
+                  class="px-4 py-2 rounded-xl bg-emerald-500 disabled:opacity-40 text-white text-xs font-bold"
+                >
+                  Confirmar Importação
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       `}

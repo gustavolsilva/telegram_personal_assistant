@@ -115,3 +115,50 @@ async def transcribe_audio(
     raise VoiceTranscriptionError(
         "Transcrição de voz no Telegram requer GROQ_API_KEY ou GEMINI_API_KEY configurada."
     )
+
+
+async def extract_receipt_command(
+    image_bytes: bytes,
+    *,
+    mime_type: str = "image/jpeg",
+    gemini_api_key: str = "",
+    timeout_seconds: float = 25.0,
+) -> str:
+    """Extrai valor, descrição e meio de pagamento de foto de cupom/comprovante Pix via Gemini."""
+    gemini_key = gemini_api_key.strip()
+    if not gemini_key:
+        raise VoiceTranscriptionError(
+            "Leitura de foto/comprovante requer GEMINI_API_KEY configurada."
+        )
+
+    b64_img = base64.b64encode(image_bytes).decode("ascii")
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "text": (
+                            "Analise esta imagem de cupom fiscal, nota ou comprovante Pix/cartão "
+                            "e converta em UMA única linha de lançamento financeiro em português do Brasil, "
+                            "no formato: '<valor com vírgula> <descrição curta do estabelecimento/item> <pix|cartão|conta>' "
+                            "(se for transferência recebida, comece com '+' antes do valor; se houver parcelamento, inclua ex: '3x'). "
+                            "Exemplo: '45,90 padaria pix'. Retorne APENAS essa linha, sem aspas nem explicações."
+                        )
+                    },
+                    {"inlineData": {"mimeType": mime_type, "data": b64_img}},
+                ]
+            }
+        ]
+    }
+    async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+        resp = await client.post(
+            f"{GEMINI_GENERATE_URL}?key={gemini_key}",
+            json=payload,
+        )
+    if resp.status_code >= 400:
+        raise VoiceTranscriptionError(f"Gemini Vision HTTP {resp.status_code}: {resp.text[:200]}")
+    data = resp.json()
+    candidates = data.get("candidates") or []
+    parts = candidates[0].get("content", {}).get("parts", []) if candidates else []
+    text = "".join(str(p.get("text", "")) for p in parts).strip()
+    return normalize_spoken_ptbr(text)

@@ -466,10 +466,19 @@ class FinanceModule(AssistantModule):
             return False
 
         voice_bytes: bytes | None = None
+        photo_bytes: bytes | None = None
         if getattr(context, "user_data", None) is not None:
             voice_bytes = context.user_data.pop("_pending_voice_bytes", None)
+            photo_bytes = context.user_data.pop("_pending_photo_bytes", None)
         is_voice = voice_bytes is not None or bool(
             getattr(msg, "voice", None) or getattr(msg, "audio", None)
+        )
+        is_photo = photo_bytes is not None or bool(getattr(msg, "photo", None))
+
+        source = (
+            "telegram_photo"
+            if is_photo
+            else ("telegram_voice" if is_voice else "telegram_text")
         )
 
         tx_input = TransactionInput(
@@ -479,14 +488,14 @@ class FinanceModule(AssistantModule):
             category_id=parsed.category_id,
             account_id=parsed.account_id,
             occurred_at=parsed.occurred_at,
-            source="telegram_voice" if is_voice else "telegram_text",
+            source=source,
             source_msg_id=msg.message_id,
             installments_total=parsed.installments_total,
             transfer_to_account_id=parsed.transfer_to_account_id,
         )
 
         if parsed.installments_total > 1:
-            created = await self.service.create_installments(tx_input)
+            created = await self.service.create_installments(tx_input, photo_bytes=photo_bytes)
             first = created[0]
             per_val = format_brl_cents(first.amount_cents)
             tot_val = format_brl_cents(parsed.amount_cents)
@@ -506,7 +515,9 @@ class FinanceModule(AssistantModule):
             )
             return True
 
-        tx = await self.service.create_transaction(tx_input, voice_bytes=voice_bytes)
+        tx = await self.service.create_transaction(
+            tx_input, photo_bytes=photo_bytes, voice_bytes=voice_bytes
+        )
         reply_text = _format_tx_reply(tx, dashboard_url=self.web_dashboard_url)
         if tx.type == "expense":
             budgets = await self.service.list_budgets()
