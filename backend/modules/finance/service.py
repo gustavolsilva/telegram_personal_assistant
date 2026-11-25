@@ -12,8 +12,10 @@ from core.telegram_storage import TelegramStorageManager
 from modules.finance.importer import parse_statement_text
 from modules.finance.models import (
     Account,
+    AssetPosition,
     Category,
     CategoryBudget,
+    Goal,
     RecurringBill,
     SyncState,
     Transaction,
@@ -57,6 +59,7 @@ class TransactionInput:
     is_paid: bool = True
     billing_month: str | None = None
     external_fitid: str | None = None
+    tags: list[str] | None = None
 
 
 class FinanceService:
@@ -124,6 +127,10 @@ class FinanceService:
                 source=data.source,
                 source_msg_id=data.source_msg_id,
                 external_fitid=data.external_fitid,
+                tags_json=json.dumps(
+                    list(dict.fromkeys(t.strip().lower().lstrip("#") for t in (data.tags or []) if t.strip())),
+                    ensure_ascii=False,
+                ),
                 notes=data.notes,
             )
             session.add(tx)
@@ -183,6 +190,10 @@ class FinanceService:
                     installment_group_id=group_id,
                     installment_number=idx + 1,
                     installment_total=total_n,
+                    tags_json=json.dumps(
+                        list(dict.fromkeys(t.strip().lower().lstrip("#") for t in (data.tags or []) if t.strip())),
+                        ensure_ascii=False,
+                    ),
                     notes=data.notes,
                 )
                 session.add(tx)
@@ -223,6 +234,7 @@ class FinanceService:
         notes: str | None = None,
         is_paid: bool | None = None,
         billing_month: str | None = None,
+        tags: list[str] | None = None,
     ) -> Transaction | None:
         async with self.session_factory() as session:
             tx = await self._load_tx(session, tx_id)
@@ -247,6 +259,11 @@ class FinanceService:
                 tx.is_paid = is_paid
             if billing_month is not None:
                 tx.billing_month = billing_month
+            if tags is not None:
+                clean_tags = list(
+                    dict.fromkeys(t.strip().lower().lstrip("#") for t in tags if t.strip())
+                )
+                tx.tags_json = json.dumps(clean_tags, ensure_ascii=False)
 
             await session.commit()
             tx = await self._load_tx(session, tx_id)
@@ -1240,6 +1257,209 @@ class FinanceService:
         if self.storage is not None and created_count > 0:
             self.storage.schedule_snapshot()
         return created_count
+
+    async def get_tags_summary(self) -> list[dict[str, Any]]:
+        async with self.session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(
+                        Transaction.type,
+                        Transaction.amount_cents,
+                        Transaction.tags_json,
+                    ).where(Transaction.deleted_at.is_(None))
+                )
+            ).all()
+
+        agg: dict[str, dict[str, Any]] = {}
+        for t_type, amt, raw_json in rows:
+            try:
+                tags = json.loads(raw_json or "[]")
+            except ValueError:
+                tags = []
+            for tag in tags:
+                key = str(tag).strip().lower()
+                if not key:
+                    continue
+                if key not in agg:
+                    agg[key] = {"tag": key, "count": 0, "expense_cents": 0, "income_cents": 0}
+                agg[key]["count"] += 1
+                if t_type == "expense":
+                    agg[key]["expense_cents"] += amt
+                elif t_type == "income":
+                    agg[key]["income_cents"] += amt
+        return sorted(agg.values(), key=lambda x: x["expense_cents"], reverse=True)
+
+    async def list_goals(self, *, as_of: datetime | None = None) -> list[dict[str, Any]]:
+        ref_now = as_of or datetime.now(UTC)
+        async with self.session_factory() as session:
+            goals = list(
+                (
+                    await session.scalars(
+                        select(Goal).where(Goal.is_active.is_(True)).order_by(Goal.created_at.asc())
+                    )
+                ).all()
+            )
+        out: list[dict[str, Any]] = []
+        for g in goals:
+            rem = max(0, g.target_cents - g.current_cents)
+            pct = round(min(100.0, (g.current_cents / g.target_cents) * 100), 1) if g.target_cents > 0 else 0.0
+            monthly_needed = 0
+            if g.target_date is not None and rem > 0:
+                td = g.target_date if g.target_date.tzinfo else g.target_date.replace(tzinfo=UTC)
+                months_left = max(1, (td.year - ref_now.year) * 12 + (td.month - ref_now.month))
+                monthly_needed = (rem + months_left - 1) // months_left
+            out.append(
+                {
+                    "id": g.id,
+                    "name": g.name,
+                    "icon": g.icon,
+                    "target_cents": g.target_cents,
+                    "current_cents": g.current_cents,
+                    "remaining_cents": rem,
+                    "pct": pct,
+                    "target_date": g.target_date.isoformat() if g.target_date else None,
+                    "monthly_needed_cents": monthly_needed,
+                }
+            )
+        return out
+
+    async def create_goal(
+        self,
+        *,
+        name: str,
+        target_cents: int,
+        current_cents: int = 0,
+        target_date: datetime | None = None,
+        icon: str = "🎯",
+    ) -> Goal:
+        async with self.session_factory() as session:
+            g = Goal(
+                name=name.strip(),
+                target_cents=target_cents,
+                current_cents=current_cents,
+                target_date=target_date,
+                icon=icon.strip() or "🎯",
+            )
+            session.add(g)
+            await session.commit()
+            await session.refresh(g)
+            if self.storage is not None:
+                self.storage.schedule_snapshot()
+            return g
+
+    async def contribute_goal(self, goal_id: str, delta_cents: int) -> Goal | None:
+        async with self.session_factory() as session:
+            g = await session.get(Goal, goal_id)
+            if g is None or not g.is_active:
+                return None
+            g.current_cents = max(0, g.current_cents + delta_cents)
+            await session.commit()
+            await session.refresh(g)
+            if self.storage is not None:
+                self.storage.schedule_snapshot()
+            return g
+
+    async def delete_goal(self, goal_id: str) -> bool:
+        async with self.session_factory() as session:
+            g = await session.get(Goal, goal_id)
+            if g is None:
+                return False
+            g.is_active = False
+            await session.commit()
+            if self.storage is not None:
+                self.storage.schedule_snapshot()
+            return True
+
+    async def get_net_worth(self) -> dict[str, Any]:
+        bal = await self.get_account_balances()
+        async with self.session_factory() as session:
+            assets = list(
+                (await session.scalars(select(AssetPosition).order_by(AssetPosition.institution, AssetPosition.name))).all()
+            )
+        invested_cents = sum(a.balance_cents for a in assets)
+        by_class: dict[str, int] = {}
+        for a in assets:
+            by_class[a.asset_class] = by_class.get(a.asset_class, 0) + a.balance_cents
+
+        cash_cents = bal["total_available_cents"]
+        liabilities_cents = bal["credit_used_cents"] + bal["credit_future_installments_cents"]
+        net_worth_cents = cash_cents + invested_cents - liabilities_cents
+
+        return {
+            "cash_cents": cash_cents,
+            "invested_cents": invested_cents,
+            "liabilities_cents": liabilities_cents,
+            "net_worth_cents": net_worth_cents,
+            "by_class": by_class,
+            "assets": [
+                {
+                    "id": a.id,
+                    "institution": a.institution,
+                    "asset_class": a.asset_class,
+                    "name": a.name,
+                    "balance_cents": a.balance_cents,
+                    "updated_at": a.updated_at.isoformat(),
+                }
+                for a in assets
+            ],
+        }
+
+    async def create_asset(
+        self,
+        *,
+        institution: str,
+        asset_class: str,
+        name: str,
+        balance_cents: int,
+    ) -> AssetPosition:
+        async with self.session_factory() as session:
+            a = AssetPosition(
+                institution=institution.strip(),
+                asset_class=asset_class,
+                name=name.strip(),
+                balance_cents=balance_cents,
+            )
+            session.add(a)
+            await session.commit()
+            await session.refresh(a)
+            if self.storage is not None:
+                self.storage.schedule_snapshot()
+            return a
+
+    async def update_asset(
+        self,
+        asset_id: str,
+        *,
+        balance_cents: int | None = None,
+        name: str | None = None,
+        institution: str | None = None,
+    ) -> AssetPosition | None:
+        async with self.session_factory() as session:
+            a = await session.get(AssetPosition, asset_id)
+            if a is None:
+                return None
+            if balance_cents is not None:
+                a.balance_cents = balance_cents
+            if name is not None:
+                a.name = name.strip()
+            if institution is not None:
+                a.institution = institution.strip()
+            await session.commit()
+            await session.refresh(a)
+            if self.storage is not None:
+                self.storage.schedule_snapshot()
+            return a
+
+    async def delete_asset(self, asset_id: str) -> bool:
+        async with self.session_factory() as session:
+            a = await session.get(AssetPosition, asset_id)
+            if a is None:
+                return False
+            await session.delete(a)
+            await session.commit()
+            if self.storage is not None:
+                self.storage.schedule_snapshot()
+            return True
 
     async def create_recurring_bill(
         self,

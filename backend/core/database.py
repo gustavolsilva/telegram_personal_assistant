@@ -125,6 +125,7 @@ class DatabaseManager:
                 ("is_paid", "BOOLEAN NOT NULL DEFAULT 1"),
                 ("billing_month", "VARCHAR(7)"),
                 ("external_fitid", "VARCHAR(120)"),
+                ("tags_json", "TEXT NOT NULL DEFAULT '[]'"),
             ]:
                 if col_name not in existing_tx:
                     sync_conn.exec_driver_sql(
@@ -142,6 +143,9 @@ class DatabaseManager:
         )
         sync_conn.exec_driver_sql(
             "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS external_fitid VARCHAR(120)"
+        )
+        sync_conn.exec_driver_sql(
+            "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS tags_json TEXT NOT NULL DEFAULT '[]'"
         )
 
     async def dispose(self) -> None:

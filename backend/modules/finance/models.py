@@ -106,6 +106,7 @@ class Transaction(Base):
     receipt_file_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     receipt_file_unique_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     external_fitid: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    tags_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
@@ -175,6 +176,42 @@ class CategoryBudget(Base):
     )
 
     category: Mapped[Category] = relationship()
+
+
+class Goal(Base):
+    __tablename__ = "goals"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid7)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    icon: Mapped[str] = mapped_column(String(16), nullable=False, default="🎯")
+    target_cents: Mapped[int] = mapped_column(Integer, nullable=False)
+    current_cents: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    target_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+
+class AssetPosition(Base):
+    __tablename__ = "asset_positions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid7)
+    institution: Mapped[str] = mapped_column(String(80), nullable=False)
+    asset_class: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="renda_fixa"
+    )  # renda_fixa | acoes_fiis | previdencia | cripto_outros
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    balance_cents: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
 
 
 class SyncState(Base):

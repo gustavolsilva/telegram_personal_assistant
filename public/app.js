@@ -131,14 +131,20 @@ function App() {
   const [cardForm, setCardForm] = useState({ name: "", closing_day: 3, due_day: 10, credit_limit: "" });
   const [accountForm, setAccountForm] = useState({ name: "", type: "checking", initial_balance: "" });
   const [budgets, setBudgets] = useState([]);
+  const [goals, setGoals] = useState([]);
+  const [netWorth, setNetWorth] = useState(null);
+  const [tagsSummary, setTagsSummary] = useState([]);
   const [invoiceModal, setInvoiceModal] = useState(null);
   const [importModal, setImportModal] = useState(null);
   const [catForm, setCatForm] = useState({ id: null, name: "", type: "expense", icon: "📦", color: "#6366f1", keywords: "" });
+  const [goalForm, setGoalForm] = useState({ name: "", target: "", current: "", target_date: "", icon: "🎯" });
+  const [assetForm, setAssetForm] = useState({ institution: "", asset_class: "renda_fixa", name: "", balance: "" });
 
   const [search, setSearch] = useState("");
   const [filterType, setFilterType] = useState("");
   const [filterCat, setFilterCat] = useState("");
   const [filterAcc, setFilterAcc] = useState("");
+  const [filterTag, setFilterTag] = useState("");
 
   const [quickCmd, setQuickCmd] = useState("");
   const [quickLoading, setQuickLoading] = useState(false);
@@ -165,6 +171,7 @@ function App() {
     installments_total: 1,
     occurred_date: new Date().toISOString().slice(0, 10),
     notes: "",
+    tags: "",
     is_paid: true,
   });
 
@@ -208,7 +215,7 @@ function App() {
       const { start, end, refDate } = getPeriodRange(period);
       const qs = `start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`;
 
-      const [cats, accs, sum, dly, mth, cbd, wkd, bal, inst, billsData, upcData, txs, sync, bdgData] = await Promise.all([
+      const [cats, accs, sum, dly, mth, cbd, wkd, bal, inst, billsData, upcData, txs, sync, bdgData, goalsData, nwData, tagsData] = await Promise.all([
         apiFetch("/api/finance/categories"),
         apiFetch("/api/finance/accounts"),
         apiFetch(`/api/finance/summary?${qs}`),
@@ -223,6 +230,9 @@ function App() {
         apiFetch(`/api/finance/transactions?limit=150`),
         apiFetch("/api/finance/sync-status"),
         apiFetch("/api/finance/budgets"),
+        apiFetch("/api/finance/goals"),
+        apiFetch("/api/finance/net-worth"),
+        apiFetch("/api/finance/tags"),
       ]);
 
       setCategories(cats);
@@ -239,6 +249,9 @@ function App() {
       setTransactions(txs);
       setSyncStatus(sync);
       setBudgets(bdgData);
+      setGoals(goalsData);
+      setNetWorth(nwData);
+      setTagsSummary(tagsData);
 
       setBillForm((prev) => ({
         ...prev,
@@ -369,6 +382,7 @@ function App() {
       category_id: firstCat,
       occurred_date: new Date().toISOString().slice(0, 10),
       notes: "",
+      tags: "",
       is_paid: true,
     }));
     setModalOpen(true);
@@ -442,6 +456,7 @@ function App() {
       installments_total: 1,
       occurred_date: new Date(tx.occurred_at).toISOString().slice(0, 10),
       notes: tx.notes || "",
+      tags: (tx.tags || []).map((t) => `#${t}`).join(", "),
       is_paid: tx.is_paid !== false,
     });
     setModalOpen(true);
@@ -454,6 +469,10 @@ function App() {
     const occIso = txForm.occurred_date
       ? new Date(`${txForm.occurred_date}T12:00:00Z`).toISOString()
       : new Date().toISOString();
+    const parsedTags = (txForm.tags || "")
+      .split(/[\s,]+/)
+      .map((t) => t.trim().replace(/^#/, "").toLowerCase())
+      .filter(Boolean);
 
     if (editingTxId) {
       await apiFetch(`/api/finance/transactions/${editingTxId}`, {
@@ -466,6 +485,7 @@ function App() {
           account_id: txForm.account_id,
           occurred_at: occIso,
           notes: txForm.notes || null,
+          tags: parsedTags,
           is_paid: txForm.is_paid,
         }),
       });
@@ -483,6 +503,7 @@ function App() {
           installments_total: txForm.tx_type === "expense" ? Number(txForm.installments_total || 1) : 1,
           occurred_at: occIso,
           notes: txForm.notes || null,
+          tags: parsedTags,
           is_paid: txForm.is_paid,
         }),
       });
@@ -497,6 +518,7 @@ function App() {
       installments_total: 1,
       occurred_date: new Date().toISOString().slice(0, 10),
       notes: "",
+      tags: "",
       is_paid: true,
     }));
     await loadAll();
@@ -526,10 +548,11 @@ function App() {
       if (filterType && t.type !== filterType) return false;
       if (filterCat && t.category_id !== filterCat) return false;
       if (filterAcc && t.account_id !== filterAcc) return false;
+      if (filterTag && !(t.tags || []).includes(filterTag)) return false;
       if (search && !t.description.toLowerCase().includes(search.toLowerCase())) return false;
       return true;
     });
-  }, [transactions, filterType, filterCat, filterAcc, search]);
+  }, [transactions, filterType, filterCat, filterAcc, filterTag, search]);
 
   const groupedTransactions = useMemo(() => {
     const todayStr = new Date().toLocaleDateString("pt-BR");
@@ -718,6 +741,7 @@ function App() {
     { id: "overview", label: "Dashboard", icon: "📊" },
     { id: "bills", label: "Fixas & Cartões", icon: "💳" },
     { id: "compare", label: "Análises", icon: "📈" },
+    { id: "wealth", label: "Patrimônio", icon: "💎" },
     { id: "ledger", label: "Extrato", icon: "🧾" },
     { id: "settings", label: "Cofre & Sync", icon: "🔐" },
   ];
@@ -1636,6 +1660,189 @@ function App() {
           </div>
         `}
 
+        <!-- TAB: PATRIMÔNIO, METAS & TAGS -->
+        ${tab === "wealth" && html`
+          <div class="space-y-6">
+            <!-- PATRIMÔNIO LÍQUIDO CONSOLIDADO -->
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+              <div class="p-5 rounded-3xl bg-gradient-to-br from-royal-600 to-blue-900 dark:from-[#17171c] dark:to-[#09090b] text-white border border-blue-400/20 dark:border-gold-500/30 shadow-lg">
+                <div class="text-xs uppercase tracking-wider opacity-80">Patrimônio Líquido</div>
+                <div class="text-2xl sm:text-3xl font-extrabold tabular-nums mt-1">${showMoney(netWorth?.net_worth_cents || 0)}</div>
+              </div>
+              <div class="p-5 rounded-3xl bg-white dark:bg-obsidian-900 border border-slate-200/80 dark:border-white/10 shadow-sm">
+                <div class="text-xs text-slate-400">Liquidez em Contas</div>
+                <div class="text-2xl font-extrabold text-emerald-500 tabular-nums mt-1">${showMoney(netWorth?.cash_cents || 0)}</div>
+              </div>
+              <div class="p-5 rounded-3xl bg-white dark:bg-obsidian-900 border border-slate-200/80 dark:border-white/10 shadow-sm">
+                <div class="text-xs text-slate-400">Investimentos Consolidados</div>
+                <div class="text-2xl font-extrabold text-royal-600 dark:text-gold-400 tabular-nums mt-1">${showMoney(netWorth?.invested_cents || 0)}</div>
+              </div>
+              <div class="p-5 rounded-3xl bg-white dark:bg-obsidian-900 border border-slate-200/80 dark:border-white/10 shadow-sm">
+                <div class="text-xs text-slate-400">Passivos (Faturas + Parcelas)</div>
+                <div class="text-2xl font-extrabold text-rose-500 tabular-nums mt-1">${showMoney(netWorth?.liabilities_cents || 0)}</div>
+              </div>
+            </div>
+
+            <!-- POSIÇÕES DE INVESTIMENTOS POR INSTITUIÇÃO -->
+            <div class="p-5 rounded-3xl bg-white dark:bg-obsidian-900 border border-slate-200/80 dark:border-white/10 shadow-sm space-y-4">
+              <h2 class="font-bold text-base">🏦 Carteira Consolidada por Instituição & Classe</h2>
+              <form
+                onSubmit=${async (e) => {
+                  e.preventDefault();
+                  await apiFetch("/api/finance/assets", {
+                    method: "POST",
+                    body: JSON.stringify({
+                      institution: assetForm.institution,
+                      asset_class: assetForm.asset_class,
+                      name: assetForm.name,
+                      balance_cents: Math.round(parseFloat(assetForm.balance || "0") * 100),
+                    }),
+                  });
+                  setAssetForm({ institution: "", asset_class: "renda_fixa", name: "", balance: "" });
+                  showToast("💎 Posição adicionada!");
+                  await loadAll();
+                }}
+                class="grid grid-cols-2 md:grid-cols-5 gap-2.5 p-3.5 rounded-2xl bg-slate-50 dark:bg-obsidian-800/40"
+              >
+                <input required value=${assetForm.institution} onInput=${(e) => setAssetForm((p) => ({ ...p, institution: e.target.value }))} placeholder="Instituição (ex: XP, Nubank)" class="px-3 py-2 rounded-xl bg-white dark:bg-obsidian-800 text-xs outline-none" />
+                <select value=${assetForm.asset_class} onChange=${(e) => setAssetForm((p) => ({ ...p, asset_class: e.target.value }))} class="px-3 py-2 rounded-xl bg-white dark:bg-obsidian-800 text-xs">
+                  <option value="renda_fixa">Renda Fixa / CDB / Tesouro</option>
+                  <option value="acoes_fiis">Ações & FIIs</option>
+                  <option value="previdencia">Previdência</option>
+                  <option value="cripto_outros">Cripto / Outros</option>
+                </select>
+                <input required value=${assetForm.name} onInput=${(e) => setAssetForm((p) => ({ ...p, name: e.target.value }))} placeholder="Ativo (ex: CDB 110%)" class="px-3 py-2 rounded-xl bg-white dark:bg-obsidian-800 text-xs outline-none" />
+                <input required type="number" step="0.01" min="0" value=${assetForm.balance} onInput=${(e) => setAssetForm((p) => ({ ...p, balance: e.target.value }))} placeholder="Saldo R$" class="px-3 py-2 rounded-xl bg-white dark:bg-obsidian-800 text-xs outline-none" />
+                <button type="submit" class="px-3 py-2 rounded-xl bg-emerald-500 text-white text-xs font-bold">+ Ativo</button>
+              </form>
+
+              <div class="divide-y divide-slate-100 dark:divide-white/5">
+                ${(netWorth?.assets || []).length ? netWorth.assets.map((a) => html`
+                  <div key=${a.id} class="py-3 flex items-center justify-between gap-3 text-xs">
+                    <div>
+                      <div class="font-semibold text-sm">${a.institution} · ${a.name}</div>
+                      <div class="text-slate-400">${a.asset_class.replace("_", " ").toUpperCase()}</div>
+                    </div>
+                    <div class="flex items-center gap-2">
+                      <strong class="text-sm tabular-nums">${showMoney(a.balance_cents)}</strong>
+                      <button
+                        onClick=${async () => {
+                          const cur = (a.balance_cents / 100).toFixed(2).replace(".", ",");
+                          const raw = prompt(`Novo saldo de "${a.name}" (R$):`, cur);
+                          if (raw === null) return;
+                          const val = parseFloat(raw.replace(/\./g, "").replace(",", "."));
+                          if (Number.isNaN(val) || val < 0) return;
+                          await apiFetch(`/api/finance/assets/${a.id}`, {
+                            method: "PATCH",
+                            body: JSON.stringify({ balance_cents: Math.round(val * 100) }),
+                          });
+                          showToast("💎 Saldo atualizado!");
+                          await loadAll();
+                        }}
+                        class="p-1 text-slate-400 hover:text-royal-500 dark:hover:text-gold-400"
+                        title="Atualizar saldo"
+                      >✏️</button>
+                      <button
+                        onClick=${async () => { await apiFetch(`/api/finance/assets/${a.id}`, { method: "DELETE" }); await loadAll(); }}
+                        class="p-1 text-slate-400 hover:text-rose-500"
+                      >🗑️</button>
+                    </div>
+                  </div>
+                `) : html`<p class="text-sm text-slate-400">Nenhum investimento cadastrado ainda.</p>`}
+              </div>
+            </div>
+
+            <!-- METAS & OBJETIVOS -->
+            <div class="p-5 rounded-3xl bg-white dark:bg-obsidian-900 border border-slate-200/80 dark:border-white/10 shadow-sm space-y-4">
+              <h2 class="font-bold text-base">🎯 Metas & Objetivos Financeiros</h2>
+              <form
+                onSubmit=${async (e) => {
+                  e.preventDefault();
+                  await apiFetch("/api/finance/goals", {
+                    method: "POST",
+                    body: JSON.stringify({
+                      name: goalForm.name,
+                      icon: goalForm.icon || "🎯",
+                      target_cents: Math.round(parseFloat(goalForm.target) * 100),
+                      current_cents: Math.round(parseFloat(goalForm.current || "0") * 100),
+                      target_date: goalForm.target_date ? new Date(`${goalForm.target_date}T12:00:00Z`).toISOString() : null,
+                    }),
+                  });
+                  setGoalForm({ name: "", target: "", current: "", target_date: "", icon: "🎯" });
+                  showToast("🎯 Meta criada!");
+                  await loadAll();
+                }}
+                class="grid grid-cols-2 md:grid-cols-6 gap-2.5 p-3.5 rounded-2xl bg-slate-50 dark:bg-obsidian-800/40"
+              >
+                <input required value=${goalForm.name} onInput=${(e) => setGoalForm((p) => ({ ...p, name: e.target.value }))} placeholder="Objetivo (ex: Reserva)" class="col-span-2 px-3 py-2 rounded-xl bg-white dark:bg-obsidian-800 text-xs outline-none" />
+                <input required type="number" step="0.01" min="1" value=${goalForm.target} onInput=${(e) => setGoalForm((p) => ({ ...p, target: e.target.value }))} placeholder="Meta R$" class="px-3 py-2 rounded-xl bg-white dark:bg-obsidian-800 text-xs outline-none" />
+                <input type="number" step="0.01" min="0" value=${goalForm.current} onInput=${(e) => setGoalForm((p) => ({ ...p, current: e.target.value }))} placeholder="Já guardado R$" class="px-3 py-2 rounded-xl bg-white dark:bg-obsidian-800 text-xs outline-none" />
+                <input type="date" value=${goalForm.target_date} onInput=${(e) => setGoalForm((p) => ({ ...p, target_date: e.target.value }))} title="Data alvo" class="px-3 py-2 rounded-xl bg-white dark:bg-obsidian-800 text-xs outline-none" />
+                <button type="submit" class="px-3 py-2 rounded-xl bg-emerald-500 text-white text-xs font-bold">+ Meta</button>
+              </form>
+
+              <div class="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                ${goals.length ? goals.map((g) => html`
+                  <div key=${g.id} class="p-4 rounded-2xl bg-slate-50 dark:bg-obsidian-800/50 border border-slate-200/60 dark:border-white/10 space-y-2">
+                    <div class="flex justify-between items-start">
+                      <div>
+                        <div class="font-bold text-sm">${g.icon} ${g.name}</div>
+                        <div class="text-xs text-slate-400">
+                          ${showMoney(g.current_cents)} de ${showMoney(g.target_cents)} (${g.pct}%)
+                        </div>
+                      </div>
+                      <div class="flex gap-1.5">
+                        <button
+                          onClick=${async () => {
+                            const raw = prompt(`Quanto aportar em "${g.name}" (R$)?`, "100");
+                            if (!raw) return;
+                            const val = parseFloat(raw.replace(/\./g, "").replace(",", "."));
+                            if (Number.isNaN(val)) return;
+                            await apiFetch(`/api/finance/goals/${g.id}/contribute`, {
+                              method: "POST",
+                              body: JSON.stringify({ delta_cents: Math.round(val * 100) }),
+                            });
+                            showToast("💰 Aporte registrado!");
+                            await loadAll();
+                          }}
+                          class="px-2.5 py-1 rounded-lg bg-emerald-500 text-white text-[11px] font-bold"
+                        >+ Aportar</button>
+                        <button onClick=${async () => { await apiFetch(`/api/finance/goals/${g.id}`, { method: "DELETE" }); await loadAll(); }} class="p-1 text-slate-400 hover:text-rose-500 text-xs">🗑️</button>
+                      </div>
+                    </div>
+                    <div class="w-full h-2 rounded-full bg-slate-200 dark:bg-obsidian-950 overflow-hidden">
+                      <div class="h-full bg-emerald-500 rounded-full transition-all duration-500" style=${{ width: `${g.pct}%` }}></div>
+                    </div>
+                    ${g.monthly_needed_cents > 0 && html`
+                      <div class="text-[11px] text-slate-400">Sugerido: <strong>${showMoney(g.monthly_needed_cents)}/mês</strong></div>
+                    `}
+                  </div>
+                `) : html`<p class="text-sm text-slate-400">Nenhuma meta cadastrada ainda.</p>`}
+              </div>
+            </div>
+
+            <!-- GASTOS TRANSVERSAIS POR #TAG (ONDE ESTÃO OS GAPS) -->
+            <div class="p-5 rounded-3xl bg-white dark:bg-obsidian-900 border border-slate-200/80 dark:border-white/10 shadow-sm">
+              <h2 class="font-bold text-base mb-3">🏷️ Custos Consolidados por #Tag</h2>
+              <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                ${tagsSummary.length ? tagsSummary.map((tg) => html`
+                  <button
+                    key=${tg.tag}
+                    onClick=${() => { setFilterTag(tg.tag); setTab("ledger"); }}
+                    class="text-left p-3.5 rounded-2xl bg-slate-50 dark:bg-obsidian-800/50 border border-slate-200/60 dark:border-white/10 hover:border-royal-500/40 dark:hover:border-gold-500/40 transition"
+                  >
+                    <div class="flex justify-between items-center text-xs mb-1">
+                      <span class="font-bold text-royal-600 dark:text-gold-400">#${tg.tag}</span>
+                      <span class="text-slate-400">${tg.count} lanç.</span>
+                    </div>
+                    <div class="text-base font-extrabold text-rose-500 tabular-nums">${showMoney(tg.expense_cents)}</div>
+                  </button>
+                `) : html`<p class="text-sm text-slate-400">Use #tags nos lançamentos (ex: "120 jantar #viagem pix") para consolidar custos aqui.</p>`}
+              </div>
+            </div>
+          </div>
+        `}
+
         <!-- TAB 3: EXTRATO -->
         ${tab === "ledger" && html`
           <div class="p-5 rounded-3xl bg-white dark:bg-obsidian-900 border border-slate-200/80 dark:border-white/10 shadow-sm">
@@ -1660,6 +1867,12 @@ function App() {
                 <option value="">Todas contas</option>
                 ${accounts.map((a) => html`<option key=${a.id} value=${a.id}>${a.name}</option>`)}
               </select>
+              ${tagsSummary.length > 0 && html`
+                <select value=${filterTag} onChange=${(e) => setFilterTag(e.target.value)} class="px-3 py-2 rounded-xl bg-slate-100 dark:bg-obsidian-800 text-sm">
+                  <option value="">Todas #tags</option>
+                  ${tagsSummary.map((tg) => html`<option key=${tg.tag} value=${tg.tag}>#${tg.tag}</option>`)}
+                </select>
+              `}
               <button onClick=${exportCSV} class="px-3.5 py-2 rounded-xl bg-slate-200 dark:bg-obsidian-800 text-xs font-semibold hover:opacity-80">⬇ CSV</button>
               <button
                 onClick=${() => setImportModal({ accountId: accounts[0]?.id || "", filename: "", rows: [], loading: false })}
@@ -1687,8 +1900,15 @@ function App() {
                               ${tx.source === "telegram_voice" && html`<span title="Lançado por voz" class="text-[11px]">🎙️</span>`}
                               ${tx.is_paid === false && html`<span class="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-500 text-[10px] font-bold">Pendente</span>`}
                             </div>
-                            <div class="text-xs text-slate-400">
-                              ${tx.category_name} · ${tx.account_name}${tx.notes ? ` · ${tx.notes}` : ""}
+                            <div class="text-xs text-slate-400 flex flex-wrap items-center gap-1.5">
+                              <span>${tx.category_name} · ${tx.account_name}${tx.notes ? ` · ${tx.notes}` : ""}</span>
+                              ${(tx.tags || []).map((tg) => html`
+                                <button
+                                  key=${tg}
+                                  onClick=${() => setFilterTag(tg)}
+                                  class="px-1.5 py-0.5 rounded bg-royal-500/15 dark:bg-gold-500/15 text-royal-600 dark:text-gold-300 text-[10px] font-semibold"
+                                >#${tg}</button>
+                              `)}
                             </div>
                           </div>
                         </div>
@@ -1954,6 +2174,12 @@ function App() {
               value=${txForm.notes}
               onInput=${(e) => setTxForm((p) => ({ ...p, notes: e.target.value }))}
               placeholder="Observações (opcional)"
+              class="w-full px-3.5 py-2 rounded-xl bg-slate-100 dark:bg-obsidian-800 text-sm outline-none"
+            />
+            <input
+              value=${txForm.tags}
+              onInput=${(e) => setTxForm((p) => ({ ...p, tags: e.target.value }))}
+              placeholder="Tags (ex: #viagem, #reembolso)"
               class="w-full px-3.5 py-2 rounded-xl bg-slate-100 dark:bg-obsidian-800 text-sm outline-none"
             />
             <label class="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-300 cursor-pointer select-none">

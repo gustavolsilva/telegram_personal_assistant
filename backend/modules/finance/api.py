@@ -27,6 +27,7 @@ class TransactionCreateBody(BaseModel):
     notes: str | None = None
     is_paid: bool = True
     billing_month: str | None = None
+    tags: list[str] | None = None
 
 
 class TransactionUpdateBody(BaseModel):
@@ -39,6 +40,7 @@ class TransactionUpdateBody(BaseModel):
     notes: str | None = None
     is_paid: bool | None = None
     billing_month: str | None = None
+    tags: list[str] | None = None
 
 
 class CategoryCreateBody(BaseModel):
@@ -95,6 +97,34 @@ class ImportConfirmBody(BaseModel):
     items: list[ImportConfirmItem]
 
 
+class GoalCreateBody(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    target_cents: int = Field(gt=0)
+    current_cents: int = Field(default=0, ge=0)
+    target_date: datetime | None = None
+    icon: str = Field(default="🎯", max_length=16)
+
+
+class GoalContributeBody(BaseModel):
+    delta_cents: int
+
+
+class AssetCreateBody(BaseModel):
+    institution: str = Field(min_length=1, max_length=80)
+    asset_class: str = Field(
+        default="renda_fixa",
+        pattern="^(renda_fixa|acoes_fiis|previdencia|cripto_outros)$",
+    )
+    name: str = Field(min_length=1, max_length=120)
+    balance_cents: int = Field(ge=0)
+
+
+class AssetUpdateBody(BaseModel):
+    balance_cents: int | None = Field(default=None, ge=0)
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    institution: str | None = Field(default=None, min_length=1, max_length=80)
+
+
 class BalanceAdjustBody(BaseModel):
     target_balance_cents: int
 
@@ -144,6 +174,7 @@ def _serialize_tx(tx: Any) -> dict[str, Any]:
         "occurred_at": tx.occurred_at.isoformat(),
         "is_paid": getattr(tx, "is_paid", True),
         "billing_month": getattr(tx, "billing_month", None),
+        "tags": json.loads(getattr(tx, "tags_json", "[]") or "[]"),
         "source": tx.source,
         "installment_number": tx.installment_number,
         "installment_total": tx.installment_total,
@@ -244,6 +275,7 @@ def create_finance_router(service: FinanceService) -> APIRouter:
                 notes=body.notes,
                 is_paid=body.is_paid,
                 billing_month=body.billing_month,
+                tags=body.tags,
             )
         )
         return _serialize_tx(tx)
@@ -261,6 +293,7 @@ def create_finance_router(service: FinanceService) -> APIRouter:
             notes=body.notes,
             is_paid=body.is_paid,
             billing_month=body.billing_month,
+            tags=body.tags,
         )
         if updated is None:
             raise HTTPException(status_code=404, detail="Lançamento não encontrado.")
@@ -438,6 +471,72 @@ def create_finance_router(service: FinanceService) -> APIRouter:
         )
         return {"imported": count}
 
+    @router.get("/tags")
+    async def get_tags_summary() -> list[dict[str, Any]]:
+        return await service.get_tags_summary()
+
+    @router.get("/goals")
+    async def list_goals() -> list[dict[str, Any]]:
+        return await service.list_goals()
+
+    @router.post("/goals", status_code=201)
+    async def create_goal(body: GoalCreateBody) -> dict[str, Any]:
+        g = await service.create_goal(
+            name=body.name,
+            target_cents=body.target_cents,
+            current_cents=body.current_cents,
+            target_date=body.target_date,
+            icon=body.icon,
+        )
+        return {"id": g.id, "name": g.name}
+
+    @router.post("/goals/{goal_id}/contribute")
+    async def contribute_goal(goal_id: str, body: GoalContributeBody) -> dict[str, Any]:
+        g = await service.contribute_goal(goal_id, body.delta_cents)
+        if g is None:
+            raise HTTPException(status_code=404, detail="Meta não encontrada.")
+        return {"id": g.id, "current_cents": g.current_cents}
+
+    @router.delete("/goals/{goal_id}")
+    async def delete_goal(goal_id: str) -> dict[str, bool]:
+        ok = await service.delete_goal(goal_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Meta não encontrada.")
+        return {"deleted": True}
+
+    @router.get("/net-worth")
+    async def get_net_worth() -> dict[str, Any]:
+        return await service.get_net_worth()
+
+    @router.post("/assets", status_code=201)
+    async def create_asset(body: AssetCreateBody) -> dict[str, Any]:
+        a = await service.create_asset(
+            institution=body.institution,
+            asset_class=body.asset_class,
+            name=body.name,
+            balance_cents=body.balance_cents,
+        )
+        return {"id": a.id, "name": a.name}
+
+    @router.patch("/assets/{asset_id}")
+    async def update_asset(asset_id: str, body: AssetUpdateBody) -> dict[str, Any]:
+        a = await service.update_asset(
+            asset_id,
+            balance_cents=body.balance_cents,
+            name=body.name,
+            institution=body.institution,
+        )
+        if a is None:
+            raise HTTPException(status_code=404, detail="Ativo não encontrado.")
+        return {"id": a.id, "balance_cents": a.balance_cents}
+
+    @router.delete("/assets/{asset_id}")
+    async def delete_asset(asset_id: str) -> dict[str, bool]:
+        ok = await service.delete_asset(asset_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Ativo não encontrado.")
+        return {"deleted": True}
+
     @router.get("/bills")
     async def list_bills() -> list[dict[str, Any]]:
         return await service.list_recurring_bills()
@@ -575,6 +674,7 @@ def create_finance_router(service: FinanceService) -> APIRouter:
             source="web_chat",
             installments_total=parsed.installments_total,
             transfer_to_account_id=parsed.transfer_to_account_id,
+            tags=parsed.tags,
         )
         if parsed.installments_total > 1:
             created = await service.create_installments(tx_input)

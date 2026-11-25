@@ -492,6 +492,7 @@ class FinanceModule(AssistantModule):
             source_msg_id=msg.message_id,
             installments_total=parsed.installments_total,
             transfer_to_account_id=parsed.transfer_to_account_id,
+            tags=parsed.tags,
         )
 
         if parsed.installments_total > 1:

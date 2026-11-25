@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 
@@ -43,6 +43,7 @@ class ParsedTransaction:
     confidence: float
     installments_total: int = 1
     transfer_to_account_id: str | None = None
+    tags: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)
@@ -204,6 +205,12 @@ def parse_ptbr_transaction(
 
     ref_now = now or datetime.now(UTC)
     working = text
+
+    # 0. Extrair #tags transversais (ex: #viagem, #reembolso)
+    raw_tags = re.findall(r"#([a-zA-Z0-9_\-À-ÿ]+)", working)
+    tags = list(dict.fromkeys(t.lower() for t in raw_tags if t.strip()))
+    if tags:
+        working = re.sub(r"#[a-zA-Z0-9_\-À-ÿ]+", " ", working)
 
     # 1. Extrair data relativa ou explícita
     occurred_at = ref_now
@@ -386,5 +393,6 @@ def parse_ptbr_transaction(
         confidence=confidence,
         installments_total=installments_total,
         transfer_to_account_id=transfer_to_account_id,
+        tags=tags,
     )
 
