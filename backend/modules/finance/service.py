@@ -12,6 +12,7 @@ from core.telegram_storage import TelegramStorageManager
 from modules.finance.models import (
     Account,
     Category,
+    CategoryBudget,
     RecurringBill,
     SyncState,
     Transaction,
@@ -31,6 +32,14 @@ def _add_months(dt: datetime, months: int) -> datetime:
     return dt.replace(year=year, month=month, day=day)
 
 
+def _billing_month_for(dt: datetime, closing_day: int | None) -> str:
+    """Determina a competência (YYYY-MM) da fatura com base no dia de fechamento."""
+    ref = dt
+    if closing_day is not None and 1 <= closing_day <= 31 and ref.day >= closing_day:
+        ref = _add_months(ref.replace(day=1), 1)
+    return f"{ref.year:04d}-{ref.month:02d}"
+
+
 @dataclass(slots=True)
 class TransactionInput:
     tx_type: str
@@ -44,6 +53,8 @@ class TransactionInput:
     notes: str | None = None
     installments_total: int = 1
     transfer_to_account_id: str | None = None
+    is_paid: bool = True
+    billing_month: str | None = None
 
 
 class FinanceService:
@@ -91,6 +102,13 @@ class FinanceService:
             return created[0]
 
         async with self.session_factory() as session:
+            occ_dt = data.occurred_at or datetime.now(UTC)
+            bill_month = data.billing_month
+            if bill_month is None:
+                acc = await session.get(Account, data.account_id)
+                if acc is not None and acc.type == "credit":
+                    bill_month = _billing_month_for(occ_dt, acc.closing_day)
+
             tx = Transaction(
                 type=data.tx_type,
                 amount_cents=data.amount_cents,
@@ -98,7 +116,9 @@ class FinanceService:
                 category_id=data.category_id,
                 account_id=data.account_id,
                 transfer_to_account_id=data.transfer_to_account_id,
-                occurred_at=data.occurred_at or datetime.now(UTC),
+                occurred_at=occ_dt,
+                is_paid=data.is_paid,
+                billing_month=bill_month,
                 source=data.source,
                 source_msg_id=data.source_msg_id,
                 notes=data.notes,
@@ -137,9 +157,13 @@ class FinanceService:
 
         created_ids: list[str] = []
         async with self.session_factory() as session:
+            acc = await session.get(Account, data.account_id)
+            closing_day = acc.closing_day if acc is not None and acc.type == "credit" else None
+            is_credit = acc is not None and acc.type == "credit"
             for idx in range(total_n):
                 part_cents = base_cents + (rem_cents if idx == 0 else 0)
                 part_dt = _add_months(start_dt, idx)
+                part_bill = _billing_month_for(part_dt, closing_day) if is_credit else None
                 tx_id = generate_uuid7()
                 tx = Transaction(
                     id=tx_id,
@@ -149,6 +173,8 @@ class FinanceService:
                     category_id=data.category_id,
                     account_id=data.account_id,
                     occurred_at=part_dt,
+                    is_paid=data.is_paid,
+                    billing_month=part_bill,
                     source=data.source,
                     source_msg_id=data.source_msg_id,
                     installment_group_id=group_id,
@@ -192,6 +218,8 @@ class FinanceService:
         account_id: str | None = None,
         occurred_at: datetime | None = None,
         notes: str | None = None,
+        is_paid: bool | None = None,
+        billing_month: str | None = None,
     ) -> Transaction | None:
         async with self.session_factory() as session:
             tx = await self._load_tx(session, tx_id)
@@ -212,6 +240,10 @@ class FinanceService:
                 tx.occurred_at = occurred_at
             if notes is not None:
                 tx.notes = notes
+            if is_paid is not None:
+                tx.is_paid = is_paid
+            if billing_month is not None:
+                tx.billing_month = billing_month
 
             await session.commit()
             tx = await self._load_tx(session, tx_id)
@@ -588,25 +620,44 @@ class FinanceService:
                         Transaction.transfer_to_account_id,
                         Transaction.occurred_at,
                         Transaction.installment_group_id,
+                        Transaction.is_paid,
                     ).where(Transaction.deleted_at.is_(None))
                 )
             ).all()
+            bills = list(
+                (await session.scalars(select(RecurringBill).where(RecurringBill.is_active.is_(True)))).all()
+            )
 
         acc_stats: dict[str, dict[str, int]] = {
             a.id: {
                 "incomes_cents": 0,
                 "expenses_cents": 0,
+                "pending_incomes_cents": 0,
+                "pending_expenses_cents": 0,
                 "future_installments_cents": 0,
             }
             for a in accounts
         }
 
+        end_of_month = _add_months(ref_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0), 1)
         for row in txs:
             occ = row.occurred_at if row.occurred_at.tzinfo else row.occurred_at.replace(tzinfo=UTC)
             is_future = occ > ref_now
             if is_future:
                 if row.type == "expense" and row.account_id in acc_stats:
                     acc_stats[row.account_id]["future_installments_cents"] += row.amount_cents
+                if occ < end_of_month:
+                    if row.type == "income" and row.account_id in acc_stats:
+                        acc_stats[row.account_id]["pending_incomes_cents"] += row.amount_cents
+                    elif row.type == "expense" and row.account_id in acc_stats:
+                        acc_stats[row.account_id]["pending_expenses_cents"] += row.amount_cents
+                continue
+
+            if not getattr(row, "is_paid", True):
+                if row.type == "income" and row.account_id in acc_stats:
+                    acc_stats[row.account_id]["pending_incomes_cents"] += row.amount_cents
+                elif row.type == "expense" and row.account_id in acc_stats:
+                    acc_stats[row.account_id]["pending_expenses_cents"] += row.amount_cents
                 continue
 
             if row.type == "income" and row.account_id in acc_stats:
@@ -619,20 +670,37 @@ class FinanceService:
                 if row.transfer_to_account_id and row.transfer_to_account_id in acc_stats:
                     acc_stats[row.transfer_to_account_id]["incomes_cents"] += row.amount_cents
 
+        cur_period_m = ref_now.strftime("%Y-%m")
+        cur_period_y = ref_now.strftime("%Y")
+        unpaid_bills_cents = 0
+        for b in bills:
+            if b.recurrence == "yearly":
+                if b.due_month == ref_now.month and b.last_paid_period != cur_period_y:
+                    unpaid_bills_cents += b.amount_cents
+            elif b.last_paid_period != cur_period_m:
+                unpaid_bills_cents += b.amount_cents
+
         items = []
         total_available_cents = 0
+        projected_delta_cents = -unpaid_bills_cents
         credit_used_cents = 0
         credit_future_cents = 0
 
         for acc in accounts:
             st = acc_stats[acc.id]
             balance_cents = acc.initial_balance_cents + st["incomes_cents"] - st["expenses_cents"]
+            available_limit_cents: int | None = None
             if acc.type == "credit":
                 used = max(0, st["expenses_cents"] - st["incomes_cents"] - acc.initial_balance_cents)
                 credit_used_cents += used
                 credit_future_cents += st["future_installments_cents"]
+                if acc.credit_limit_cents > 0:
+                    available_limit_cents = max(
+                        0, acc.credit_limit_cents - used - st["future_installments_cents"]
+                    )
             else:
                 total_available_cents += balance_cents
+                projected_delta_cents += st["pending_incomes_cents"] - st["pending_expenses_cents"]
 
             items.append(
                 {
@@ -644,6 +712,7 @@ class FinanceService:
                     "closing_day": acc.closing_day,
                     "due_day": acc.due_day,
                     "credit_limit_cents": acc.credit_limit_cents,
+                    "available_limit_cents": available_limit_cents,
                     "incomes_cents": st["incomes_cents"],
                     "expenses_cents": st["expenses_cents"],
                     "balance_cents": balance_cents,
@@ -653,6 +722,8 @@ class FinanceService:
 
         return {
             "total_available_cents": total_available_cents,
+            "projected_total_available_cents": total_available_cents + projected_delta_cents,
+            "unpaid_bills_cents": unpaid_bills_cents,
             "credit_used_cents": credit_used_cents,
             "credit_future_installments_cents": credit_future_cents,
             "accounts": items,
@@ -759,6 +830,301 @@ class FinanceService:
             if self.storage is not None:
                 self.storage.schedule_snapshot()
             return acc
+
+    async def update_account(
+        self,
+        account_id: str,
+        *,
+        name: str | None = None,
+        color: str | None = None,
+        closing_day: int | None = None,
+        due_day: int | None = None,
+        credit_limit_cents: int | None = None,
+        is_active: bool | None = None,
+    ) -> Account | None:
+        async with self.session_factory() as session:
+            acc = await session.get(Account, account_id)
+            if acc is None:
+                return None
+            if name is not None:
+                acc.name = name.strip()
+            if color is not None:
+                acc.color = color
+            if closing_day is not None:
+                acc.closing_day = closing_day
+            if due_day is not None:
+                acc.due_day = due_day
+            if credit_limit_cents is not None:
+                acc.credit_limit_cents = credit_limit_cents
+            if is_active is not None:
+                acc.is_active = is_active
+            await session.commit()
+            await session.refresh(acc)
+            if self.storage is not None:
+                self.storage.schedule_snapshot()
+            return acc
+
+    async def create_category(
+        self,
+        *,
+        name: str,
+        cat_type: str,
+        icon: str = "📦",
+        color: str = "#64748b",
+        keywords: list[str] | None = None,
+    ) -> Category:
+        clean_kw = [k.strip().lower() for k in (keywords or []) if k.strip()]
+        async with self.session_factory() as session:
+            cat = Category(
+                name=name.strip(),
+                type=cat_type,
+                icon=icon.strip() or "📦",
+                color=color.strip() or "#64748b",
+                keywords_json=json.dumps(clean_kw, ensure_ascii=False),
+            )
+            session.add(cat)
+            await session.commit()
+            await session.refresh(cat)
+            if self.storage is not None:
+                self.storage.schedule_snapshot()
+            return cat
+
+    async def update_category(
+        self,
+        category_id: str,
+        *,
+        name: str | None = None,
+        icon: str | None = None,
+        color: str | None = None,
+        keywords: list[str] | None = None,
+    ) -> Category | None:
+        async with self.session_factory() as session:
+            cat = await session.get(Category, category_id)
+            if cat is None:
+                return None
+            if name is not None:
+                cat.name = name.strip()
+            if icon is not None:
+                cat.icon = icon.strip() or cat.icon
+            if color is not None:
+                cat.color = color.strip() or cat.color
+            if keywords is not None:
+                clean_kw = [k.strip().lower() for k in keywords if k.strip()]
+                cat.keywords_json = json.dumps(clean_kw, ensure_ascii=False)
+            await session.commit()
+            await session.refresh(cat)
+            if self.storage is not None:
+                self.storage.schedule_snapshot()
+            return cat
+
+    async def delete_category(self, category_id: str) -> tuple[bool, str]:
+        async with self.session_factory() as session:
+            cat = await session.get(Category, category_id)
+            if cat is None:
+                return False, "Categoria não encontrada."
+            has_tx = await session.scalar(
+                select(Transaction.id)
+                .where(Transaction.category_id == category_id, Transaction.deleted_at.is_(None))
+                .limit(1)
+            )
+            if has_tx is not None:
+                return False, "Categoria possui lançamentos vinculados."
+            budget = await session.scalar(
+                select(CategoryBudget).where(CategoryBudget.category_id == category_id)
+            )
+            if budget is not None:
+                await session.delete(budget)
+            await session.delete(cat)
+            await session.commit()
+            if self.storage is not None:
+                self.storage.schedule_snapshot()
+            return True, ""
+
+    async def get_card_invoice(
+        self,
+        account_id: str,
+        month: str | None = None,
+        *,
+        as_of: datetime | None = None,
+    ) -> dict[str, Any] | None:
+        ref_now = as_of or datetime.now(UTC)
+        async with self.session_factory() as session:
+            acc = await session.get(Account, account_id)
+            if acc is None or acc.type != "credit":
+                return None
+            target_month = month or _billing_month_for(ref_now, acc.closing_day)
+            stmt = (
+                select(Transaction)
+                .options(
+                    selectinload(Transaction.category),
+                    selectinload(Transaction.account),
+                )
+                .where(
+                    Transaction.deleted_at.is_(None),
+                    (Transaction.account_id == account_id)
+                    | (Transaction.transfer_to_account_id == account_id),
+                )
+                .order_by(Transaction.occurred_at.desc())
+            )
+            all_card_txs = list((await session.scalars(stmt)).all())
+
+        invoice_txs: list[Transaction] = []
+        total_cents = 0
+        paid_cents = 0
+        for tx in all_card_txs:
+            bm = tx.billing_month or _billing_month_for(
+                tx.occurred_at if tx.occurred_at.tzinfo else tx.occurred_at.replace(tzinfo=UTC),
+                acc.closing_day,
+            )
+            if bm != target_month:
+                continue
+            if tx.type == "expense" and tx.account_id == account_id:
+                invoice_txs.append(tx)
+                total_cents += tx.amount_cents
+            elif tx.type == "income" and tx.account_id == account_id:
+                invoice_txs.append(tx)
+                paid_cents += tx.amount_cents
+            elif tx.type == "transfer" and tx.transfer_to_account_id == account_id:
+                invoice_txs.append(tx)
+                paid_cents += tx.amount_cents
+
+        remaining_cents = max(0, total_cents - paid_cents)
+        cur_open = _billing_month_for(ref_now, acc.closing_day)
+        if total_cents > 0 and remaining_cents == 0:
+            status = "paid"
+        elif target_month < cur_open:
+            status = "closed"
+        else:
+            status = "open"
+
+        return {
+            "account_id": acc.id,
+            "account_name": acc.name,
+            "month": target_month,
+            "closing_day": acc.closing_day,
+            "due_day": acc.due_day,
+            "credit_limit_cents": acc.credit_limit_cents,
+            "total_cents": total_cents,
+            "paid_cents": paid_cents,
+            "remaining_cents": remaining_cents,
+            "status": status,
+            "transactions": invoice_txs,
+        }
+
+    async def pay_card_invoice(
+        self,
+        account_id: str,
+        *,
+        month: str,
+        from_account_id: str,
+        amount_cents: int | None = None,
+    ) -> Transaction | None:
+        inv = await self.get_card_invoice(account_id, month)
+        if inv is None:
+            return None
+        pay_amt = amount_cents or inv["remaining_cents"]
+        if pay_amt <= 0:
+            return None
+
+        async with self.session_factory() as session:
+            cat = await session.scalar(select(Category).where(Category.type == "expense").limit(1))
+            if cat is None:
+                return None
+            cat_id = cat.id
+
+        return await self.create_transaction(
+            TransactionInput(
+                tx_type="transfer",
+                amount_cents=pay_amt,
+                description=f"Pagamento fatura {inv['account_name']} ({month})",
+                category_id=cat_id,
+                account_id=from_account_id,
+                transfer_to_account_id=account_id,
+                occurred_at=datetime.now(UTC),
+                source="web",
+                billing_month=month,
+            )
+        )
+
+    async def list_budgets(self, *, as_of: datetime | None = None) -> list[dict[str, Any]]:
+        ref_now = as_of or datetime.now(UTC)
+        month_start = ref_now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        month_end = _add_months(month_start, 1)
+
+        async with self.session_factory() as session:
+            cats = list(
+                (
+                    await session.scalars(
+                        select(Category).where(Category.type == "expense").order_by(Category.name)
+                    )
+                ).all()
+            )
+            budgets = list((await session.scalars(select(CategoryBudget))).all())
+            txs = (
+                await session.execute(
+                    select(Transaction.category_id, Transaction.amount_cents).where(
+                        and_(
+                            Transaction.deleted_at.is_(None),
+                            Transaction.type == "expense",
+                            Transaction.occurred_at >= month_start,
+                            Transaction.occurred_at < month_end,
+                        )
+                    )
+                )
+            ).all()
+
+        spent_by_cat: dict[str, int] = {}
+        for cid, amt in txs:
+            spent_by_cat[cid] = spent_by_cat.get(cid, 0) + amt
+        budget_map = {b.category_id: b.limit_cents for b in budgets}
+
+        result: list[dict[str, Any]] = []
+        for c in cats:
+            limit_cents = budget_map.get(c.id, 0)
+            spent_cents = spent_by_cat.get(c.id, 0)
+            pct = round((spent_cents / limit_cents) * 100, 1) if limit_cents > 0 else 0.0
+            status = (
+                "none"
+                if limit_cents <= 0
+                else ("exceeded" if pct >= 100 else ("warning" if pct >= 80 else "ok"))
+            )
+            result.append(
+                {
+                    "category_id": c.id,
+                    "category_name": c.name,
+                    "category_icon": c.icon,
+                    "category_color": c.color,
+                    "limit_cents": limit_cents,
+                    "spent_cents": spent_cents,
+                    "remaining_cents": max(0, limit_cents - spent_cents) if limit_cents > 0 else 0,
+                    "pct": pct,
+                    "status": status,
+                }
+            )
+        return result
+
+    async def upsert_budget(self, category_id: str, limit_cents: int) -> dict[str, Any] | None:
+        async with self.session_factory() as session:
+            cat = await session.get(Category, category_id)
+            if cat is None:
+                return None
+            existing = await session.scalar(
+                select(CategoryBudget).where(CategoryBudget.category_id == category_id)
+            )
+            if limit_cents <= 0:
+                if existing is not None:
+                    await session.delete(existing)
+                    await session.commit()
+            elif existing is not None:
+                existing.limit_cents = limit_cents
+                await session.commit()
+            else:
+                session.add(CategoryBudget(category_id=category_id, limit_cents=limit_cents))
+                await session.commit()
+            if self.storage is not None:
+                self.storage.schedule_snapshot()
+        budgets = await self.list_budgets()
+        return next((b for b in budgets if b["category_id"] == category_id), None)
 
     async def create_recurring_bill(
         self,

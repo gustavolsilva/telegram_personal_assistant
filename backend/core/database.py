@@ -92,6 +92,8 @@ class DatabaseManager:
             await conn.run_sync(Base.metadata.create_all)
             if self.is_sqlite:
                 await conn.run_sync(self._migrate_missing_columns)
+            else:
+                await conn.run_sync(self._migrate_postgres_columns)
 
     @staticmethod
     def _migrate_missing_columns(sync_conn) -> None:
@@ -120,11 +122,23 @@ class DatabaseManager:
                 ("installment_group_id", "VARCHAR(36)"),
                 ("installment_number", "INTEGER"),
                 ("installment_total", "INTEGER"),
+                ("is_paid", "BOOLEAN NOT NULL DEFAULT 1"),
+                ("billing_month", "VARCHAR(7)"),
             ]:
                 if col_name not in existing_tx:
                     sync_conn.exec_driver_sql(
                         f"ALTER TABLE transactions ADD COLUMN {col_name} {col_def}"
                     )
+
+    @staticmethod
+    def _migrate_postgres_columns(sync_conn) -> None:
+        """Garante evolução segura do schema Postgres/Neon sem perder dados existentes."""
+        sync_conn.exec_driver_sql(
+            "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS is_paid BOOLEAN NOT NULL DEFAULT TRUE"
+        )
+        sync_conn.exec_driver_sql(
+            "ALTER TABLE transactions ADD COLUMN IF NOT EXISTS billing_month VARCHAR(7)"
+        )
 
     async def dispose(self) -> None:
         await self.engine.dispose()

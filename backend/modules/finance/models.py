@@ -95,6 +95,8 @@ class Transaction(Base):
     occurred_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utc_now
     )
+    is_paid: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    billing_month: Mapped[str | None] = mapped_column(String(7), nullable=True)
     source: Mapped[str] = mapped_column(
         String(32), nullable=False, default="telegram_text"
     )  # telegram_text | telegram_voice | telegram_photo | web
@@ -154,6 +156,24 @@ class RecurringBill(Base):
 
     category: Mapped[Category] = relationship()
     account: Mapped[Account] = relationship()
+
+
+class CategoryBudget(Base):
+    __tablename__ = "budgets"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=generate_uuid7)
+    category_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("categories.id"), nullable=False, unique=True
+    )
+    limit_cents: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now
+    )
+
+    category: Mapped[Category] = relationship()
 
 
 class SyncState(Base):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 from typing import Any
 
@@ -24,6 +25,8 @@ class TransactionCreateBody(BaseModel):
     installments_total: int = Field(default=1, ge=1, le=48)
     occurred_at: datetime | None = None
     notes: str | None = None
+    is_paid: bool = True
+    billing_month: str | None = None
 
 
 class TransactionUpdateBody(BaseModel):
@@ -34,6 +37,42 @@ class TransactionUpdateBody(BaseModel):
     account_id: str | None = None
     occurred_at: datetime | None = None
     notes: str | None = None
+    is_paid: bool | None = None
+    billing_month: str | None = None
+
+
+class CategoryCreateBody(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    type: str = Field(default="expense", pattern="^(expense|income)$")
+    icon: str = Field(default="📦", max_length=16)
+    color: str = Field(default="#64748b", max_length=16)
+    keywords: list[str] = Field(default_factory=list)
+
+
+class CategoryUpdateBody(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    icon: str | None = Field(default=None, max_length=16)
+    color: str | None = Field(default=None, max_length=16)
+    keywords: list[str] | None = None
+
+
+class AccountUpdateBody(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    color: str | None = None
+    closing_day: int | None = Field(default=None, ge=1, le=31)
+    due_day: int | None = Field(default=None, ge=1, le=31)
+    credit_limit_cents: int | None = Field(default=None, ge=0)
+    is_active: bool | None = None
+
+
+class PayInvoiceBody(BaseModel):
+    month: str = Field(pattern=r"^\d{4}-\d{2}$")
+    from_account_id: str
+    amount_cents: int | None = Field(default=None, gt=0)
+
+
+class BudgetUpsertBody(BaseModel):
+    limit_cents: int = Field(ge=0)
 
 
 class BalanceAdjustBody(BaseModel):
@@ -83,6 +122,8 @@ def _serialize_tx(tx: Any) -> dict[str, Any]:
         "account_id": tx.account_id,
         "account_name": tx.account.name if tx.account else "",
         "occurred_at": tx.occurred_at.isoformat(),
+        "is_paid": getattr(tx, "is_paid", True),
+        "billing_month": getattr(tx, "billing_month", None),
         "source": tx.source,
         "installment_number": tx.installment_number,
         "installment_total": tx.installment_total,
@@ -181,6 +222,8 @@ def create_finance_router(service: FinanceService) -> APIRouter:
                 occurred_at=body.occurred_at,
                 source="web",
                 notes=body.notes,
+                is_paid=body.is_paid,
+                billing_month=body.billing_month,
             )
         )
         return _serialize_tx(tx)
@@ -196,6 +239,8 @@ def create_finance_router(service: FinanceService) -> APIRouter:
             account_id=body.account_id,
             occurred_at=body.occurred_at,
             notes=body.notes,
+            is_paid=body.is_paid,
+            billing_month=body.billing_month,
         )
         if updated is None:
             raise HTTPException(status_code=404, detail="Lançamento não encontrado.")
@@ -218,9 +263,55 @@ def create_finance_router(service: FinanceService) -> APIRouter:
                 "type": c.type,
                 "icon": c.icon,
                 "color": c.color,
+                "keywords": json.loads(c.keywords_json or "[]"),
             }
             for c in cats
         ]
+
+    @router.post("/categories", status_code=201)
+    async def create_category(body: CategoryCreateBody) -> dict[str, Any]:
+        cat = await service.create_category(
+            name=body.name,
+            cat_type=body.type,
+            icon=body.icon,
+            color=body.color,
+            keywords=body.keywords,
+        )
+        return {
+            "id": cat.id,
+            "name": cat.name,
+            "type": cat.type,
+            "icon": cat.icon,
+            "color": cat.color,
+            "keywords": json.loads(cat.keywords_json or "[]"),
+        }
+
+    @router.patch("/categories/{category_id}")
+    async def update_category(category_id: str, body: CategoryUpdateBody) -> dict[str, Any]:
+        cat = await service.update_category(
+            category_id,
+            name=body.name,
+            icon=body.icon,
+            color=body.color,
+            keywords=body.keywords,
+        )
+        if cat is None:
+            raise HTTPException(status_code=404, detail="Categoria não encontrada.")
+        return {
+            "id": cat.id,
+            "name": cat.name,
+            "type": cat.type,
+            "icon": cat.icon,
+            "color": cat.color,
+            "keywords": json.loads(cat.keywords_json or "[]"),
+        }
+
+    @router.delete("/categories/{category_id}")
+    async def delete_category(category_id: str) -> dict[str, bool]:
+        ok, err = await service.delete_category(category_id)
+        if not ok:
+            raise HTTPException(status_code=400, detail=err)
+        return {"deleted": True}
 
     @router.get("/accounts")
     async def list_accounts() -> list[dict[str, Any]]:
@@ -235,8 +326,10 @@ def create_finance_router(service: FinanceService) -> APIRouter:
                 "closing_day": a.closing_day,
                 "due_day": a.due_day,
                 "credit_limit_cents": a.credit_limit_cents,
+                "is_active": a.is_active,
             }
             for a in accs
+            if a.is_active
         ]
 
     @router.post("/accounts", status_code=201)
@@ -250,7 +343,64 @@ def create_finance_router(service: FinanceService) -> APIRouter:
             due_day=body.due_day,
             credit_limit_cents=body.credit_limit_cents,
         )
-        return {"id": acc.id, "name": acc.name, "type": acc.type, "due_day": acc.due_day}
+        return {
+            "id": acc.id,
+            "name": acc.name,
+            "type": acc.type,
+            "due_day": acc.due_day,
+            "credit_limit_cents": acc.credit_limit_cents,
+        }
+
+    @router.patch("/accounts/{account_id}")
+    async def update_account(account_id: str, body: AccountUpdateBody) -> dict[str, Any]:
+        acc = await service.update_account(
+            account_id,
+            name=body.name,
+            color=body.color,
+            closing_day=body.closing_day,
+            due_day=body.due_day,
+            credit_limit_cents=body.credit_limit_cents,
+            is_active=body.is_active,
+        )
+        if acc is None:
+            raise HTTPException(status_code=404, detail="Conta não encontrada.")
+        return {"id": acc.id, "name": acc.name, "is_active": acc.is_active}
+
+    @router.get("/cards/{account_id}/invoice")
+    async def get_card_invoice(
+        account_id: str,
+        month: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
+    ) -> dict[str, Any]:
+        inv = await service.get_card_invoice(account_id, month=month)
+        if inv is None:
+            raise HTTPException(status_code=404, detail="Cartão não encontrado.")
+        return {
+            **{k: v for k, v in inv.items() if k != "transactions"},
+            "transactions": [_serialize_tx(tx) for tx in inv["transactions"]],
+        }
+
+    @router.post("/cards/{account_id}/pay")
+    async def pay_card_invoice(account_id: str, body: PayInvoiceBody) -> dict[str, Any]:
+        tx = await service.pay_card_invoice(
+            account_id,
+            month=body.month,
+            from_account_id=body.from_account_id,
+            amount_cents=body.amount_cents,
+        )
+        if tx is None:
+            raise HTTPException(status_code=400, detail="Fatura vazia ou cartão inválido.")
+        return _serialize_tx(tx)
+
+    @router.get("/budgets")
+    async def list_budgets() -> list[dict[str, Any]]:
+        return await service.list_budgets()
+
+    @router.put("/budgets/{category_id}")
+    async def upsert_budget(category_id: str, body: BudgetUpsertBody) -> dict[str, Any]:
+        res = await service.upsert_budget(category_id, body.limit_cents)
+        if res is None:
+            raise HTTPException(status_code=404, detail="Categoria não encontrada.")
+        return res
 
     @router.get("/bills")
     async def list_bills() -> list[dict[str, Any]]:

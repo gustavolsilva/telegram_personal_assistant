@@ -507,8 +507,16 @@ class FinanceModule(AssistantModule):
             return True
 
         tx = await self.service.create_transaction(tx_input, voice_bytes=voice_bytes)
+        reply_text = _format_tx_reply(tx, dashboard_url=self.web_dashboard_url)
+        if tx.type == "expense":
+            budgets = await self.service.list_budgets()
+            b = next((x for x in budgets if x["category_id"] == tx.category_id), None)
+            if b and b["status"] == "exceeded":
+                reply_text += f"\n\n🚨 <b>Orçamento estourado em {b['category_name']}:</b> {b['pct']}%"
+            elif b and b["status"] == "warning":
+                reply_text += f"\n\n⚠️ <b>Orçamento de {b['category_name']} em {b['pct']}%</b>"
         await msg.reply_html(
-            _format_tx_reply(tx, dashboard_url=self.web_dashboard_url),
+            reply_text,
             reply_markup=_tx_keyboard(tx.id, self.web_dashboard_url),
         )
         return True

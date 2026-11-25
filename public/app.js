@@ -128,12 +128,16 @@ function App() {
     category_id: "",
     account_id: "",
   });
-  const [cardForm, setCardForm] = useState({ name: "", closing_day: 3, due_day: 10 });
+  const [cardForm, setCardForm] = useState({ name: "", closing_day: 3, due_day: 10, credit_limit: "" });
   const [accountForm, setAccountForm] = useState({ name: "", type: "checking", initial_balance: "" });
+  const [budgets, setBudgets] = useState([]);
+  const [invoiceModal, setInvoiceModal] = useState(null);
+  const [catForm, setCatForm] = useState({ id: null, name: "", type: "expense", icon: "📦", color: "#6366f1", keywords: "" });
 
   const [search, setSearch] = useState("");
   const [filterType, setFilterType] = useState("");
   const [filterCat, setFilterCat] = useState("");
+  const [filterAcc, setFilterAcc] = useState("");
 
   const [quickCmd, setQuickCmd] = useState("");
   const [quickLoading, setQuickLoading] = useState(false);
@@ -149,6 +153,7 @@ function App() {
   ]);
 
   const [modalOpen, setModalOpen] = useState(false);
+  const [editingTxId, setEditingTxId] = useState(null);
   const [txForm, setTxForm] = useState({
     tx_type: "expense",
     amount: "",
@@ -157,6 +162,9 @@ function App() {
     account_id: "",
     transfer_to_account_id: "",
     installments_total: 1,
+    occurred_date: new Date().toISOString().slice(0, 10),
+    notes: "",
+    is_paid: true,
   });
 
   const [accessToken, setAccessToken] = useState(() => localStorage.getItem("tpa_access_token") || "");
@@ -199,7 +207,7 @@ function App() {
       const { start, end, refDate } = getPeriodRange(period);
       const qs = `start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`;
 
-      const [cats, accs, sum, dly, mth, cbd, wkd, bal, inst, billsData, upcData, txs, sync] = await Promise.all([
+      const [cats, accs, sum, dly, mth, cbd, wkd, bal, inst, billsData, upcData, txs, sync, bdgData] = await Promise.all([
         apiFetch("/api/finance/categories"),
         apiFetch("/api/finance/accounts"),
         apiFetch(`/api/finance/summary?${qs}`),
@@ -211,8 +219,9 @@ function App() {
         apiFetch("/api/finance/installments"),
         apiFetch("/api/finance/bills"),
         apiFetch("/api/finance/upcoming"),
-        apiFetch(`/api/finance/transactions?limit=100`),
+        apiFetch(`/api/finance/transactions?limit=150`),
         apiFetch("/api/finance/sync-status"),
+        apiFetch("/api/finance/budgets"),
       ]);
 
       setCategories(cats);
@@ -228,6 +237,7 @@ function App() {
       setUpcoming(upcData);
       setTransactions(txs);
       setSyncStatus(sync);
+      setBudgets(bdgData);
 
       setBillForm((prev) => ({
         ...prev,
@@ -349,7 +359,17 @@ function App() {
   const openModalWithType = (type) => {
     const ct = type === "transfer" ? "expense" : type;
     const firstCat = categories.find((c) => c.type === ct)?.id || "";
-    setTxForm((p) => ({ ...p, tx_type: type, category_id: firstCat }));
+    setEditingTxId(null);
+    setTxForm((p) => ({
+      ...p,
+      tx_type: type,
+      amount: "",
+      description: "",
+      category_id: firstCat,
+      occurred_date: new Date().toISOString().slice(0, 10),
+      notes: "",
+      is_paid: true,
+    }));
     setModalOpen(true);
   };
 
@@ -409,36 +429,129 @@ function App() {
     await loadAll();
   };
 
-  const handleCreateTx = async (e) => {
+  const openEditTx = (tx) => {
+    setEditingTxId(tx.id);
+    setTxForm({
+      tx_type: tx.type,
+      amount: (tx.amount_cents / 100).toFixed(2),
+      description: tx.description,
+      category_id: tx.category_id,
+      account_id: tx.account_id,
+      transfer_to_account_id: tx.transfer_to_account_id || accounts[0]?.id || "",
+      installments_total: 1,
+      occurred_date: new Date(tx.occurred_at).toISOString().slice(0, 10),
+      notes: tx.notes || "",
+      is_paid: tx.is_paid !== false,
+    });
+    setModalOpen(true);
+  };
+
+  const handleSaveTx = async (e) => {
     e.preventDefault();
     const amountCents = Math.round(parseFloat(txForm.amount) * 100);
     if (!amountCents || amountCents <= 0) return;
-    await apiFetch("/api/finance/transactions", {
-      method: "POST",
-      body: JSON.stringify({
-        tx_type: txForm.tx_type,
-        amount_cents: amountCents,
-        description: txForm.description,
-        category_id: txForm.category_id,
-        account_id: txForm.account_id,
-        transfer_to_account_id: txForm.tx_type === "transfer" ? txForm.transfer_to_account_id : null,
-        installments_total: txForm.tx_type === "expense" ? Number(txForm.installments_total || 1) : 1,
-      }),
-    });
+    const occIso = txForm.occurred_date
+      ? new Date(`${txForm.occurred_date}T12:00:00Z`).toISOString()
+      : new Date().toISOString();
+
+    if (editingTxId) {
+      await apiFetch(`/api/finance/transactions/${editingTxId}`, {
+        method: "PATCH",
+        body: JSON.stringify({
+          tx_type: txForm.tx_type,
+          amount_cents: amountCents,
+          description: txForm.description,
+          category_id: txForm.category_id,
+          account_id: txForm.account_id,
+          occurred_at: occIso,
+          notes: txForm.notes || null,
+          is_paid: txForm.is_paid,
+        }),
+      });
+      showToast("✏️ Lançamento atualizado!");
+    } else {
+      await apiFetch("/api/finance/transactions", {
+        method: "POST",
+        body: JSON.stringify({
+          tx_type: txForm.tx_type,
+          amount_cents: amountCents,
+          description: txForm.description,
+          category_id: txForm.category_id,
+          account_id: txForm.account_id,
+          transfer_to_account_id: txForm.tx_type === "transfer" ? txForm.transfer_to_account_id : null,
+          installments_total: txForm.tx_type === "expense" ? Number(txForm.installments_total || 1) : 1,
+          occurred_at: occIso,
+          notes: txForm.notes || null,
+          is_paid: txForm.is_paid,
+        }),
+      });
+      showToast("✅ Lançamento salvo!");
+    }
     setModalOpen(false);
-    setTxForm((p) => ({ ...p, amount: "", description: "", installments_total: 1 }));
-    showToast("✅ Lançamento salvo!");
+    setEditingTxId(null);
+    setTxForm((p) => ({
+      ...p,
+      amount: "",
+      description: "",
+      installments_total: 1,
+      occurred_date: new Date().toISOString().slice(0, 10),
+      notes: "",
+      is_paid: true,
+    }));
     await loadAll();
+  };
+
+  const openInvoice = async (acc, month = null) => {
+    const qs = month ? `?month=${encodeURIComponent(month)}` : "";
+    const data = await apiFetch(`/api/finance/cards/${acc.id}/invoice${qs}`);
+    setInvoiceModal({
+      account: acc,
+      data,
+      month: data.month,
+      payFromId: cashAccounts[0]?.id || "",
+    });
+  };
+
+  const shiftInvoiceMonth = async (delta) => {
+    if (!invoiceModal) return;
+    const [y, m] = invoiceModal.month.split("-").map(Number);
+    const dt = new Date(Date.UTC(y, m - 1 + delta, 1));
+    const nextMonth = `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, "0")}`;
+    await openInvoice(invoiceModal.account, nextMonth);
   };
 
   const filteredTransactions = useMemo(() => {
     return transactions.filter((t) => {
       if (filterType && t.type !== filterType) return false;
       if (filterCat && t.category_id !== filterCat) return false;
+      if (filterAcc && t.account_id !== filterAcc) return false;
       if (search && !t.description.toLowerCase().includes(search.toLowerCase())) return false;
       return true;
     });
-  }, [transactions, filterType, filterCat, search]);
+  }, [transactions, filterType, filterCat, filterAcc, search]);
+
+  const groupedTransactions = useMemo(() => {
+    const todayStr = new Date().toLocaleDateString("pt-BR");
+    const yest = new Date();
+    yest.setDate(yest.getDate() - 1);
+    const yestStr = yest.toLocaleDateString("pt-BR");
+    const groups = [];
+    const map = new Map();
+    for (const tx of filteredTransactions) {
+      const dStr = new Date(tx.occurred_at).toLocaleDateString("pt-BR");
+      const label = dStr === todayStr ? "Hoje" : dStr === yestStr ? "Ontem" : dStr;
+      if (!map.has(dStr)) {
+        const g = { key: dStr, label, netCents: 0, items: [] };
+        map.set(dStr, g);
+        groups.push(g);
+      }
+      const g = map.get(dStr);
+      g.items.push(tx);
+      if (tx.type === "income") g.netCents += tx.amount_cents;
+      else if (tx.type === "expense") g.netCents -= tx.amount_cents;
+    }
+    return groups;
+  }, [filteredTransactions]);
 
   const exportCSV = () => {
     const header = "Data,Tipo,Valor_BRL,Descricao,Categoria,Conta\n";
@@ -1006,6 +1119,14 @@ function App() {
                   <div class="text-3xl sm:text-4xl font-extrabold tabular-nums tracking-tight mt-1">
                     ${showMoney(balances?.total_available_cents || 0)}
                   </div>
+                  ${typeof balances?.projected_total_available_cents === "number" && html`
+                    <div class="mt-1.5 flex items-center gap-2 text-xs text-slate-400">
+                      <span>Previsto fim do mês:</span>
+                      <strong class=${`tabular-nums ${balances.projected_total_available_cents < 0 ? "text-rose-500" : "text-slate-600 dark:text-slate-200"}`}>
+                        ${showMoney(balances.projected_total_available_cents)}
+                      </strong>
+                    </div>
+                  `}
                   ${incomeCents > 0 && html`
                     <div class="mt-3">
                       <div class="w-full h-1.5 rounded-full bg-slate-100 dark:bg-white/10 overflow-hidden">
@@ -1054,6 +1175,9 @@ function App() {
                       <button onClick=${() => setActiveCardIdx((i) => (i - 1 + creditAccounts.length) % creditAccounts.length)} class="px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 text-xs">◀</button>
                       <button onClick=${() => setActiveCardIdx((i) => (i + 1) % creditAccounts.length)} class="px-2 py-0.5 rounded bg-white/10 hover:bg-white/20 text-xs">▶</button>
                     `}
+                    ${creditAccount && html`
+                      <button onClick=${() => openInvoice(creditAccount)} class="px-2 py-0.5 rounded-lg bg-white/15 hover:bg-white/25 text-[11px] font-semibold">Fatura</button>
+                    `}
                     <button onClick=${() => setTab("bills")} class="text-[11px] opacity-85 hover:opacity-100 underline ml-1">Gerenciar</button>
                   </div>
                 </div>
@@ -1064,6 +1188,11 @@ function App() {
                     <span>${creditAccount?.due_day ? `Vence dia ${creditAccount.due_day}` : ""}</span>
                   </div>
                   <div class="text-3xl font-extrabold tabular-nums">${showMoney(creditUsed)}</div>
+                  ${creditAccount?.credit_limit_cents > 0 && html`
+                    <div class="text-[11px] text-blue-100/90 dark:text-gold-200/80 mt-1">
+                      Limite livre: <strong class="tabular-nums">${showMoney(creditAccount.available_limit_cents ?? 0)}</strong> de ${showMoney(creditAccount.credit_limit_cents)}
+                    </div>
+                  `}
                 </div>
 
                 <div class="z-10 space-y-2">
@@ -1187,10 +1316,13 @@ function App() {
                           <div class="text-xs text-slate-400">${tx.category_name} · ${tx.account_name} · ${new Date(tx.occurred_at).toLocaleDateString("pt-BR")}</div>
                         </div>
                       </div>
-                      <div class=${`font-bold text-sm tabular-nums shrink-0 ${
-                        tx.type === "income" ? "text-emerald-500" : tx.type === "transfer" ? "text-indigo-400" : "text-rose-500"
-                      }`}>
-                        ${tx.type === "income" ? "+" : tx.type === "transfer" ? "⇄ " : "-"}${showMoney(tx.amount_cents)}
+                      <div class="flex items-center gap-2 shrink-0">
+                        <div class=${`font-bold text-sm tabular-nums ${
+                          tx.type === "income" ? "text-emerald-500" : tx.type === "transfer" ? "text-indigo-400" : "text-rose-500"
+                        }`}>
+                          ${tx.type === "income" ? "+" : tx.type === "transfer" ? "⇄ " : "-"}${showMoney(tx.amount_cents)}
+                        </div>
+                        <button onClick=${() => openEditTx(tx)} class="p-1 text-slate-400 hover:text-royal-500 dark:hover:text-gold-400 text-xs" title="Editar">✏️</button>
                       </div>
                     </div>
                   `)}
@@ -1243,7 +1375,7 @@ function App() {
                       <span class="font-semibold text-slate-700 dark:text-slate-200">🏦 ${acc.name}</span>
                       <button onClick=${() => handleAdjustBalance(acc)} class="hover:text-emerald-500">✏️</button>
                     </div>
-                    <div class="text-xl font-extrabold tabular-nums">${fmtBRL(acc.balance_cents)}</div>
+                    <div class="text-xl font-extrabold tabular-nums">${showMoney(acc.balance_cents)}</div>
                   </div>
                 `)}
               </div>
@@ -1256,6 +1388,9 @@ function App() {
                 <form
                   onSubmit=${async (e) => {
                     e.preventDefault();
+                    const limitCents = cardForm.credit_limit
+                      ? Math.round(parseFloat(cardForm.credit_limit) * 100)
+                      : 0;
                     await apiFetch("/api/finance/accounts", {
                       method: "POST",
                       body: JSON.stringify({
@@ -1263,17 +1398,19 @@ function App() {
                         type: "credit",
                         closing_day: Number(cardForm.closing_day),
                         due_day: Number(cardForm.due_day),
+                        credit_limit_cents: limitCents,
                       }),
                     });
-                    setCardForm({ name: "", closing_day: 3, due_day: 10 });
+                    setCardForm({ name: "", closing_day: 3, due_day: 10, credit_limit: "" });
                     showToast("💳 Cartão adicionado!");
                     await loadAll();
                   }}
                   class="flex flex-wrap items-center gap-2"
                 >
                   <input required value=${cardForm.name} onInput=${(e) => setCardForm((p) => ({ ...p, name: e.target.value }))} placeholder="Nome (ex: Inter)" class="px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-obsidian-800 text-xs outline-none" />
-                  <input type="number" min="1" max="31" value=${cardForm.closing_day} onInput=${(e) => setCardForm((p) => ({ ...p, closing_day: e.target.value }))} title="Dia fechamento" class="w-16 px-2 py-1.5 rounded-xl bg-slate-100 dark:bg-obsidian-800 text-xs" />
-                  <input type="number" min="1" max="31" value=${cardForm.due_day} onInput=${(e) => setCardForm((p) => ({ ...p, due_day: e.target.value }))} title="Dia vencimento" class="w-16 px-2 py-1.5 rounded-xl bg-slate-100 dark:bg-obsidian-800 text-xs" />
+                  <input type="number" min="1" max="31" value=${cardForm.closing_day} onInput=${(e) => setCardForm((p) => ({ ...p, closing_day: e.target.value }))} title="Dia fechamento" class="w-14 px-2 py-1.5 rounded-xl bg-slate-100 dark:bg-obsidian-800 text-xs" />
+                  <input type="number" min="1" max="31" value=${cardForm.due_day} onInput=${(e) => setCardForm((p) => ({ ...p, due_day: e.target.value }))} title="Dia vencimento" class="w-14 px-2 py-1.5 rounded-xl bg-slate-100 dark:bg-obsidian-800 text-xs" />
+                  <input type="number" step="0.01" min="0" value=${cardForm.credit_limit} onInput=${(e) => setCardForm((p) => ({ ...p, credit_limit: e.target.value }))} placeholder="Limite R$" class="w-24 px-2.5 py-1.5 rounded-xl bg-slate-100 dark:bg-obsidian-800 text-xs outline-none" />
                   <button type="submit" class="px-3 py-1.5 rounded-xl bg-indigo-500 text-white text-xs font-semibold">+ Cartão</button>
                 </form>
               </div>
@@ -1282,12 +1419,18 @@ function App() {
                   const used = Math.max(0, acc.expenses_cents - acc.incomes_cents - acc.initial_balance_cents);
                   return html`
                     <div key=${acc.id} class="p-4 rounded-2xl bg-gradient-to-br from-slate-900 to-indigo-950 text-white border border-white/10">
-                      <div class="flex justify-between text-xs opacity-80 mb-2">
+                      <div class="flex justify-between items-center text-xs opacity-85 mb-2">
                         <span class="font-bold">💳 ${acc.name}</span>
-                        <span>${acc.due_day ? `Vence dia ${acc.due_day}` : "Sem venc."}</span>
+                        <div class="flex items-center gap-2">
+                          <span>${acc.due_day ? `Vence dia ${acc.due_day}` : "Sem venc."}</span>
+                          <button onClick=${() => openInvoice(acc)} class="px-2 py-0.5 rounded-lg bg-white/15 hover:bg-white/25 text-[11px] font-semibold">Fatura</button>
+                        </div>
                       </div>
-                      <div class="text-2xl font-extrabold tabular-nums">${fmtBRL(used)}</div>
-                      <div class="text-[11px] text-indigo-200 mt-1">Parcelas futuras: ${fmtBRL(acc.future_installments_cents)}</div>
+                      <div class="text-2xl font-extrabold tabular-nums">${showMoney(used)}</div>
+                      <div class="text-[11px] text-indigo-200 mt-1">Parcelas futuras: ${showMoney(acc.future_installments_cents)}</div>
+                      ${acc.credit_limit_cents > 0 && html`
+                        <div class="text-[11px] text-emerald-300 mt-0.5">Limite livre: ${showMoney(acc.available_limit_cents ?? 0)} / ${showMoney(acc.credit_limit_cents)}</div>
+                      `}
                     </div>
                   `;
                 })}
@@ -1355,7 +1498,7 @@ function App() {
                       </div>
                       <div class="flex items-center gap-2.5">
                         ${statusBadge}
-                        <strong class="text-sm tabular-nums">${fmtBRL(b.amount_cents)}</strong>
+                        <strong class="text-sm tabular-nums">${showMoney(b.amount_cents)}</strong>
                         ${b.status !== "paid" && html`
                           <button
                             onClick=${async () => { await apiFetch(`/api/finance/bills/${b.id}/pay`, { method: "POST" }); showToast(`✅ ${b.name} pago!`); await loadAll(); }}
@@ -1402,16 +1545,66 @@ function App() {
                         <span>${c.icon}</span>
                         <div>
                           <div class="text-sm font-semibold">${c.name}</div>
-                          <div class="text-xs text-slate-400">Média 3m: ${fmtBRL(c.avg_3m_cents)}</div>
+                          <div class="text-xs text-slate-400">Média 3m: ${showMoney(c.avg_3m_cents)}</div>
                         </div>
                       </div>
                       <div class="text-right">
-                        <div class="text-sm font-bold tabular-nums">${fmtBRL(c.total_cents)}</div>
+                        <div class="text-sm font-bold tabular-nums">${showMoney(c.total_cents)}</div>
                         ${html`<${DeltaPill} pct=${c.deviation_vs_avg_pct} invertColors=${true} />`}
                       </div>
                     </div>
                   `)}
                 </div>
+              </div>
+            </div>
+
+            <!-- ORÇAMENTOS MENSAIS POR CATEGORIA (MOBILLS STYLE) -->
+            <div class="p-5 rounded-3xl bg-white dark:bg-obsidian-900 border border-slate-200/80 dark:border-white/10 shadow-sm">
+              <div class="flex items-center justify-between mb-3">
+                <div>
+                  <h2 class="font-bold text-base">🎯 Orçamentos Mensais por Categoria</h2>
+                  <p class="text-xs text-slate-400">Defina um teto por categoria para receber alertas ao atingir 80% ou 100%</p>
+                </div>
+              </div>
+              <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                ${budgets.map((b) => {
+                  const barColor = b.status === "exceeded" ? "bg-rose-500" : b.status === "warning" ? "bg-amber-500" : "bg-emerald-500";
+                  const barPct = b.limit_cents > 0 ? Math.min(100, Math.round(b.pct)) : 0;
+                  return html`
+                    <div key=${b.category_id} class="p-3.5 rounded-2xl bg-slate-50 dark:bg-obsidian-800/50 border border-slate-200/60 dark:border-white/10 space-y-2">
+                      <div class="flex items-center justify-between gap-2">
+                        <span class="text-xs font-semibold truncate">${b.category_icon} ${b.category_name}</span>
+                        <button
+                          onClick=${async () => {
+                            const cur = b.limit_cents > 0 ? (b.limit_cents / 100).toFixed(2).replace(".", ",") : "";
+                            const raw = prompt(`Teto mensal para ${b.category_name} (R$, deixe 0 para remover):`, cur);
+                            if (raw === null) return;
+                            const val = parseFloat(raw.replace(/\./g, "").replace(",", ".") || "0");
+                            if (Number.isNaN(val) || val < 0) return;
+                            await apiFetch(`/api/finance/budgets/${b.category_id}`, {
+                              method: "PUT",
+                              body: JSON.stringify({ limit_cents: Math.round(val * 100) }),
+                            });
+                            showToast(`🎯 Orçamento de ${b.category_name} atualizado!`);
+                            await loadAll();
+                          }}
+                          class="text-[11px] font-semibold text-royal-600 dark:text-gold-400 hover:underline shrink-0"
+                        >
+                          ${b.limit_cents > 0 ? "Editar teto" : "+ Definir teto"}
+                        </button>
+                      </div>
+                      <div class="flex justify-between text-xs tabular-nums">
+                        <span>Gasto: <strong>${showMoney(b.spent_cents)}</strong></span>
+                        <span class="text-slate-400">${b.limit_cents > 0 ? `Teto: ${showMoney(b.limit_cents)} (${b.pct}%)` : "Sem limite"}</span>
+                      </div>
+                      ${b.limit_cents > 0 && html`
+                        <div class="w-full h-2 rounded-full bg-slate-200 dark:bg-obsidian-950 overflow-hidden">
+                          <div class=${`h-full rounded-full transition-all duration-500 ${barColor}`} style=${{ width: `${barPct}%` }}></div>
+                        </div>
+                      `}
+                    </div>
+                  `;
+                })}
               </div>
             </div>
 
@@ -1426,9 +1619,9 @@ function App() {
                       <div class="flex justify-between items-start mb-2">
                         <div>
                           <div class="font-semibold text-sm">${inst.category_icon} ${inst.description}</div>
-                          <div class="text-xs text-slate-400">${inst.account_name} · ${inst.total_installments}x de ${fmtBRL(inst.installment_amount_cents)}</div>
+                          <div class="text-xs text-slate-400">${inst.account_name} · ${inst.total_installments}x de ${showMoney(inst.installment_amount_cents)}</div>
                         </div>
-                        <div class="text-sm font-bold tabular-nums">${fmtBRL(inst.remaining_cents)}</div>
+                        <div class="text-sm font-bold tabular-nums">${showMoney(inst.remaining_cents)}</div>
                       </div>
                       <div class="w-full h-2 rounded-full bg-slate-200 dark:bg-obsidian-950 overflow-hidden">
                         <div class="h-full bg-indigo-500 rounded-full" style=${{ width: `${pct}%` }}></div>
@@ -1462,29 +1655,50 @@ function App() {
                 <option value="">Todas categorias</option>
                 ${categories.map((c) => html`<option key=${c.id} value=${c.id}>${c.icon} ${c.name}</option>`)}
               </select>
+              <select value=${filterAcc} onChange=${(e) => setFilterAcc(e.target.value)} class="px-3 py-2 rounded-xl bg-slate-100 dark:bg-obsidian-800 text-sm">
+                <option value="">Todas contas</option>
+                ${accounts.map((a) => html`<option key=${a.id} value=${a.id}>${a.name}</option>`)}
+              </select>
               <button onClick=${exportCSV} class="px-3.5 py-2 rounded-xl bg-slate-200 dark:bg-obsidian-800 text-xs font-semibold hover:opacity-80">⬇ CSV</button>
             </div>
 
-            <div class="divide-y divide-slate-100 dark:divide-white/5">
-              ${filteredTransactions.map((tx) => html`
-                <div key=${tx.id} class="py-3 flex items-center justify-between gap-3">
-                  <div class="flex items-center gap-3 min-w-0">
-                    <div class="w-10 h-10 rounded-2xl bg-slate-100 dark:bg-obsidian-800 flex items-center justify-center text-lg shrink-0">${tx.category_icon}</div>
-                    <div class="min-w-0">
-                      <div class="font-semibold text-sm truncate">${tx.description}</div>
-                      <div class="text-xs text-slate-400">${tx.category_name} · ${tx.account_name} · ${new Date(tx.occurred_at).toLocaleDateString("pt-BR")}</div>
-                    </div>
+            <div class="space-y-4">
+              ${groupedTransactions.length ? groupedTransactions.map((grp) => html`
+                <div key=${grp.key}>
+                  <div class="flex items-center justify-between px-2 py-1.5 text-[11px] font-bold uppercase tracking-wider text-slate-400 border-b border-slate-100 dark:border-white/10">
+                    <span>${grp.label}</span>
+                    <span class="tabular-nums">${grp.netCents >= 0 ? "+" : "-"}${showMoney(Math.abs(grp.netCents))}</span>
                   </div>
-                  <div class="flex items-center gap-3 shrink-0">
-                    <span class=${`font-bold text-sm tabular-nums ${
-                      tx.type === "income" ? "text-emerald-500" : tx.type === "transfer" ? "text-indigo-400" : "text-rose-500"
-                    }`}>
-                      ${tx.type === "income" ? "+" : tx.type === "transfer" ? "⇄ " : "-"}${fmtBRL(tx.amount_cents)}
-                    </span>
-                    <button onClick=${() => handleDeleteTx(tx.id)} class="p-1.5 rounded-lg hover:bg-rose-500/15 text-slate-400 hover:text-rose-500 transition">🗑️</button>
+                  <div class="divide-y divide-slate-100 dark:divide-white/5">
+                    ${grp.items.map((tx) => html`
+                      <div key=${tx.id} class="py-3 flex items-center justify-between gap-3">
+                        <div class="flex items-center gap-3 min-w-0">
+                          <div class="w-10 h-10 rounded-2xl bg-slate-100 dark:bg-obsidian-800 flex items-center justify-center text-lg shrink-0">${tx.category_icon}</div>
+                          <div class="min-w-0">
+                            <div class="font-semibold text-sm truncate flex items-center gap-1.5">
+                              <span>${tx.description}</span>
+                              ${tx.source === "telegram_voice" && html`<span title="Lançado por voz" class="text-[11px]">🎙️</span>`}
+                              ${tx.is_paid === false && html`<span class="px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-500 text-[10px] font-bold">Pendente</span>`}
+                            </div>
+                            <div class="text-xs text-slate-400">
+                              ${tx.category_name} · ${tx.account_name}${tx.notes ? ` · ${tx.notes}` : ""}
+                            </div>
+                          </div>
+                        </div>
+                        <div class="flex items-center gap-2 shrink-0">
+                          <span class=${`font-bold text-sm tabular-nums ${
+                            tx.type === "income" ? "text-emerald-500" : tx.type === "transfer" ? "text-indigo-400" : "text-rose-500"
+                          }`}>
+                            ${tx.type === "income" ? "+" : tx.type === "transfer" ? "⇄ " : "-"}${showMoney(tx.amount_cents)}
+                          </span>
+                          <button onClick=${() => openEditTx(tx)} class="p-1.5 rounded-lg hover:bg-royal-500/15 text-slate-400 hover:text-royal-500 dark:hover:text-gold-400 transition" title="Editar">✏️</button>
+                          <button onClick=${() => handleDeleteTx(tx.id)} class="p-1.5 rounded-lg hover:bg-rose-500/15 text-slate-400 hover:text-rose-500 transition" title="Excluir">🗑️</button>
+                        </div>
+                      </div>
+                    `)}
                   </div>
                 </div>
-              `)}
+              `) : html`<p class="text-sm text-slate-400 py-4 text-center">Nenhum lançamento encontrado.</p>`}
             </div>
           </div>
         `}
@@ -1507,23 +1721,55 @@ function App() {
               </button>
             </div>
 
-            <div class="p-5 rounded-3xl bg-white dark:bg-obsidian-900 border border-slate-200/80 dark:border-white/10 shadow-sm">
-              <h2 class="font-bold text-base mb-2">Token de Acesso Remoto</h2>
-              <p class="text-xs text-slate-400 mb-3">Caso tenha definido WEB_ACCESS_TOKEN no servidor:</p>
-              <div class="flex gap-2">
-                <input
-                  type="password"
-                  value=${accessToken}
-                  onInput=${(e) => setAccessToken(e.target.value)}
-                  placeholder="Token de acesso"
-                  class="flex-1 px-3.5 py-2 rounded-xl bg-slate-100 dark:bg-obsidian-800 text-sm outline-none"
-                />
-                <button
-                  onClick=${() => { localStorage.setItem("tpa_access_token", accessToken.trim()); showToast("Token salvo."); loadAll(); }}
-                  class="px-4 py-2 rounded-xl bg-slate-900 dark:bg-indigo-500 text-white text-sm font-semibold"
-                >
-                  Salvar
-                </button>
+            <div class="p-5 rounded-3xl bg-white dark:bg-obsidian-900 border border-slate-200/80 dark:border-white/10 shadow-sm space-y-3">
+              <h2 class="font-bold text-base">🏷️ Categorias & Palavras-chave (Bot/Voz)</h2>
+              <form
+                onSubmit=${async (e) => {
+                  e.preventDefault();
+                  const kw = catForm.keywords.split(",").map((s) => s.trim()).filter(Boolean);
+                  if (catForm.id) {
+                    await apiFetch(`/api/finance/categories/${catForm.id}`, {
+                      method: "PATCH",
+                      body: JSON.stringify({ name: catForm.name, icon: catForm.icon, color: catForm.color, keywords: kw }),
+                    });
+                    showToast("🏷️ Categoria atualizada!");
+                  } else {
+                    await apiFetch("/api/finance/categories", {
+                      method: "POST",
+                      body: JSON.stringify({ name: catForm.name, type: catForm.type, icon: catForm.icon, color: catForm.color, keywords: kw }),
+                    });
+                    showToast("🏷️ Categoria criada!");
+                  }
+                  setCatForm({ id: null, name: "", type: "expense", icon: "📦", color: "#6366f1", keywords: "" });
+                  await loadAll();
+                }}
+                class="grid grid-cols-2 sm:grid-cols-5 gap-2"
+              >
+                <input required value=${catForm.name} onInput=${(e) => setCatForm((p) => ({ ...p, name: e.target.value }))} placeholder="Nome" class="col-span-2 px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-obsidian-800 text-xs outline-none" />
+                <input value=${catForm.icon} onInput=${(e) => setCatForm((p) => ({ ...p, icon: e.target.value }))} placeholder="Ícone" class="px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-obsidian-800 text-xs outline-none" />
+                <select disabled=${Boolean(catForm.id)} value=${catForm.type} onChange=${(e) => setCatForm((p) => ({ ...p, type: e.target.value }))} class="px-2.5 py-1.5 rounded-xl bg-slate-100 dark:bg-obsidian-800 text-xs">
+                  <option value="expense">Despesa</option>
+                  <option value="income">Receita</option>
+                </select>
+                <button type="submit" class="px-3 py-1.5 rounded-xl bg-emerald-500 text-white text-xs font-semibold">${catForm.id ? "Atualizar" : "+ Criar"}</button>
+                <input value=${catForm.keywords} onInput=${(e) => setCatForm((p) => ({ ...p, keywords: e.target.value }))} placeholder="Palavras-chave separadas por vírgula (ex: padaria, ifood)" class="col-span-2 sm:col-span-5 px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-obsidian-800 text-xs outline-none" />
+              </form>
+              <div class="max-h-56 overflow-y-auto divide-y divide-slate-100 dark:divide-white/5">
+                ${categories.map((c) => html`
+                  <div key=${c.id} class="py-2 flex items-center justify-between gap-2 text-xs">
+                    <div class="min-w-0">
+                      <span class="font-semibold">${c.icon} ${c.name}</span>
+                      <span class="text-slate-400 ml-1.5">(${c.type === "income" ? "Receita" : "Despesa"})</span>
+                    </div>
+                    <div class="flex items-center gap-1.5 shrink-0">
+                      <button
+                        onClick=${() => setCatForm({ id: c.id, name: c.name, type: c.type, icon: c.icon, color: c.color, keywords: (c.keywords || []).join(", ") })}
+                        class="p-1 text-slate-400 hover:text-royal-500 dark:hover:text-gold-400"
+                        title="Editar"
+                      >✏️</button>
+                    </div>
+                  </div>
+                `)}
               </div>
             </div>
           </div>
@@ -1595,11 +1841,20 @@ function App() {
         </div>
       `}
 
-      <!-- MODAL NOVO LANÇAMENTO -->
+      <!-- FAB MOBILE + -->
+      <button
+        onClick=${() => openModalWithType("expense")}
+        title="Novo Lançamento"
+        class="md:hidden fixed left-4 bottom-20 z-50 w-12 h-12 rounded-full bg-emerald-500 text-white text-2xl font-bold shadow-xl shadow-emerald-500/30 flex items-center justify-center active:scale-95 transition"
+      >
+        +
+      </button>
+
+      <!-- MODAL NOVO / EDITAR LANÇAMENTO -->
       ${modalOpen && html`
         <div class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <form onSubmit=${handleCreateTx} class="w-full max-w-md p-6 rounded-3xl bg-white dark:bg-obsidian-900 border border-slate-200 dark:border-white/10 shadow-2xl space-y-3.5">
-            <h3 class="text-lg font-bold">Novo Lançamento</h3>
+          <form onSubmit=${handleSaveTx} class="w-full max-w-md p-6 rounded-3xl bg-white dark:bg-obsidian-900 border border-slate-200 dark:border-white/10 shadow-2xl space-y-3">
+            <h3 class="text-lg font-bold">${editingTxId ? "Editar Lançamento" : "Novo Lançamento"}</h3>
             <select
               value=${txForm.tx_type}
               onChange=${(e) => {
@@ -1631,6 +1886,29 @@ function App() {
               placeholder="Descrição"
               class="w-full px-3.5 py-2.5 rounded-xl bg-slate-100 dark:bg-obsidian-800 text-sm outline-none"
             />
+            <div class="flex items-center gap-2">
+              <input
+                type="date"
+                required
+                value=${txForm.occurred_date}
+                onInput=${(e) => setTxForm((p) => ({ ...p, occurred_date: e.target.value }))}
+                class="flex-1 px-3.5 py-2 rounded-xl bg-slate-100 dark:bg-obsidian-800 text-sm outline-none"
+              />
+              <button
+                type="button"
+                onClick=${() => setTxForm((p) => ({ ...p, occurred_date: new Date().toISOString().slice(0, 10) }))}
+                class="px-2.5 py-2 rounded-xl bg-slate-100 dark:bg-obsidian-800 text-xs font-semibold"
+              >Hoje</button>
+              <button
+                type="button"
+                onClick=${() => {
+                  const d = new Date();
+                  d.setDate(d.getDate() - 1);
+                  setTxForm((p) => ({ ...p, occurred_date: d.toISOString().slice(0, 10) }));
+                }}
+                class="px-2.5 py-2 rounded-xl bg-slate-100 dark:bg-obsidian-800 text-xs font-semibold"
+              >Ontem</button>
+            </div>
             <select
               value=${txForm.category_id}
               onChange=${(e) => setTxForm((p) => ({ ...p, category_id: e.target.value }))}
@@ -1654,7 +1932,7 @@ function App() {
                 ${accounts.map((a) => html`<option key=${a.id} value=${a.id}>Destino: ${a.name}</option>`)}
               </select>
             `}
-            ${txForm.tx_type === "expense" && html`
+            ${!editingTxId && txForm.tx_type === "expense" && html`
               <input
                 type="number"
                 min="1"
@@ -1665,11 +1943,97 @@ function App() {
                 class="w-full px-3.5 py-2.5 rounded-xl bg-slate-100 dark:bg-obsidian-800 text-sm outline-none"
               />
             `}
+            <input
+              value=${txForm.notes}
+              onInput=${(e) => setTxForm((p) => ({ ...p, notes: e.target.value }))}
+              placeholder="Observações (opcional)"
+              class="w-full px-3.5 py-2 rounded-xl bg-slate-100 dark:bg-obsidian-800 text-sm outline-none"
+            />
+            <label class="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-300 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked=${txForm.is_paid}
+                onChange=${(e) => setTxForm((p) => ({ ...p, is_paid: e.target.checked }))}
+                class="rounded accent-emerald-500"
+              />
+              <span>Lançamento já efetivado / pago</span>
+            </label>
             <div class="flex justify-end gap-2 pt-2">
-              <button type="button" onClick=${() => setModalOpen(false)} class="px-4 py-2 rounded-xl bg-slate-200 dark:bg-obsidian-800 text-sm font-medium">Cancelar</button>
+              <button type="button" onClick=${() => { setModalOpen(false); setEditingTxId(null); }} class="px-4 py-2 rounded-xl bg-slate-200 dark:bg-obsidian-800 text-sm font-medium">Cancelar</button>
               <button type="submit" class="px-4 py-2 rounded-xl bg-emerald-500 text-white text-sm font-semibold">Salvar</button>
             </div>
           </form>
+        </div>
+      `}
+
+      <!-- MODAL FATURA DO CARTÃO -->
+      ${invoiceModal && html`
+        <div class="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div class="w-full max-w-lg p-6 rounded-3xl bg-white dark:bg-obsidian-900 border border-slate-200 dark:border-white/10 shadow-2xl space-y-4 max-h-[85vh] flex flex-col">
+            <div class="flex items-center justify-between">
+              <div>
+                <h3 class="text-lg font-bold">💳 Fatura ${invoiceModal.account.name}</h3>
+                <div class="text-xs text-slate-400">
+                  Fecha dia ${invoiceModal.data.closing_day || "-"} · Vence dia ${invoiceModal.data.due_day || "-"}
+                </div>
+              </div>
+              <button onClick=${() => setInvoiceModal(null)} class="p-1.5 text-slate-400 hover:text-rose-500">✕</button>
+            </div>
+
+            <div class="flex items-center justify-between p-3 rounded-2xl bg-slate-50 dark:bg-obsidian-800/60">
+              <button onClick=${() => shiftInvoiceMonth(-1)} class="px-2.5 py-1 rounded-lg bg-slate-200 dark:bg-obsidian-800 text-xs font-bold">◀</button>
+              <div class="text-center">
+                <div class="text-xs font-bold uppercase tracking-wider text-slate-400">${invoiceModal.month}</div>
+                <div class="text-xl font-extrabold tabular-nums">${showMoney(invoiceModal.data.remaining_cents)}</div>
+                <div class="text-[11px] text-slate-400">
+                  Total: ${showMoney(invoiceModal.data.total_cents)} · Pago: ${showMoney(invoiceModal.data.paid_cents)}
+                </div>
+              </div>
+              <button onClick=${() => shiftInvoiceMonth(1)} class="px-2.5 py-1 rounded-lg bg-slate-200 dark:bg-obsidian-800 text-xs font-bold">▶</button>
+            </div>
+
+            <div class="flex-1 overflow-y-auto divide-y divide-slate-100 dark:divide-white/5 pr-1">
+              ${invoiceModal.data.transactions.length ? invoiceModal.data.transactions.map((tx) => html`
+                <div key=${tx.id} class="py-2.5 flex items-center justify-between text-xs">
+                  <div>
+                    <div class="font-semibold">${tx.category_icon} ${tx.description}</div>
+                    <div class="text-slate-400">${new Date(tx.occurred_at).toLocaleDateString("pt-BR")} · ${tx.category_name}</div>
+                  </div>
+                  <strong class="tabular-nums ${tx.type === "transfer" || tx.type === "income" ? "text-emerald-500" : ""}">
+                    ${tx.type === "transfer" || tx.type === "income" ? "-" : ""}${showMoney(tx.amount_cents)}
+                  </strong>
+                </div>
+              `) : html`<p class="text-xs text-slate-400 py-6 text-center">Nenhum lançamento nesta fatura.</p>`}
+            </div>
+
+            ${invoiceModal.data.remaining_cents > 0 && cashAccounts.length > 0 && html`
+              <form
+                onSubmit=${async (e) => {
+                  e.preventDefault();
+                  await apiFetch(`/api/finance/cards/${invoiceModal.account.id}/pay`, {
+                    method: "POST",
+                    body: JSON.stringify({
+                      month: invoiceModal.month,
+                      from_account_id: invoiceModal.payFromId || cashAccounts[0].id,
+                    }),
+                  });
+                  showToast("✅ Fatura paga com sucesso!");
+                  setInvoiceModal(null);
+                  await loadAll();
+                }}
+                class="flex items-center gap-2 pt-2 border-t border-slate-100 dark:border-white/10"
+              >
+                <select
+                  value=${invoiceModal.payFromId}
+                  onChange=${(e) => setInvoiceModal((p) => ({ ...p, payFromId: e.target.value }))}
+                  class="flex-1 px-3 py-2 rounded-xl bg-slate-100 dark:bg-obsidian-800 text-xs"
+                >
+                  ${cashAccounts.map((a) => html`<option key=${a.id} value=${a.id}>Pagar com: ${a.name}</option>`)}
+                </select>
+                <button type="submit" class="px-4 py-2 rounded-xl bg-emerald-500 text-white text-xs font-bold">Pagar Fatura</button>
+              </form>
+            `}
+          </div>
         </div>
       `}
 
